@@ -18,8 +18,9 @@
  * The upstream URL mirrors the path: .../api/v4/search → <baseUrl>/v4/search.
  *
  * AI-facing memory tools (host-side, registered into the dsh tool runtime):
- *   supermemory_search — semantic recall over the memory store;
- *   supermemory_save  — persist an entity-centric fact.
+ *   supermemory_search  — semantic recall over the memory store;
+ *   supermemory_save    — persist an entity-centric fact;
+ *   supermemory_forget  — forget memories by exact ids or semantic query.
  * Both call the upstream directly with the configured Bearer key (the same
  * credential source as the proxy), so agents get memory without a browser
  * origin or any additional credential surface.
@@ -377,6 +378,122 @@ function makeSaveTool(scope: SettingsScope<any>): ToolDefinition {
     };
 }
 
+/**
+ * Memory-forget tool: delete memories from the local Supermemory store —
+ * either exact memory ids, or a natural-language query the server matches
+ * semantically. dryRun previews before any mutation.
+ */
+function makeForgetTool(scope: SettingsScope<any>): ToolDefinition {
+    return {
+        name: 'supermemory_forget',
+        description:
+            'Delete or forget memories in the local Supermemory store (删除/遗忘记忆). Pass exact memory ids, or a natural-language query/topic the server matches semantically; use dryRun to preview first. Use it to clean up wrong, outdated or test memories.',
+        parameters: {
+            type: 'object',
+            properties: {
+                ids: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Exact memory ids to forget (no semantic matching). Either ids or query is required.',
+                },
+                query: {
+                    type: 'string',
+                    description: 'Natural-language instruction ("forget everything about Project Titan") or a bare topic ("Project Titan"). Either ids or query is required.',
+                },
+                containerTag: {
+                    type: 'string',
+                    description: 'Container tag / space the forget operation is scoped to.',
+                    default: DEFAULT_CONTAINER,
+                },
+                dryRun: {
+                    type: 'boolean',
+                    description: 'When true, only preview which memories WOULD be forgotten (no mutation).',
+                    default: false,
+                },
+                threshold: {
+                    type: 'number',
+                    description: 'Minimum cosine similarity for semantic matching (lower = wider net).',
+                    default: 0.5,
+                },
+                maxForget: {
+                    type: 'number',
+                    description: 'Maximum number of memories this call may forget (1–500).',
+                    default: 100,
+                },
+                reason: {
+                    type: 'string',
+                    description: 'Optional reason stored as forgetReason on each memory.',
+                },
+            },
+        },
+        output: {
+            schema: {
+                type: 'object',
+                properties: {
+                    dryRun: { type: 'boolean' },
+                    count: { type: 'number' },
+                    forgetBatchId: { type: 'string' },
+                    summary: { type: 'string' },
+                },
+                required: ['dryRun', 'count', 'summary'],
+                additionalProperties: false,
+            },
+            render: (_args, value) => {
+                const v = value as { dryRun?: boolean; count?: number; summary?: string };
+                const prefix = v.dryRun ? '（预览，未实际删除）' : '';
+                return [{ type: 'text', text: 'supermemory_forget' + prefix + ': ' + (v.summary ?? '') + '（' + (v.count ?? 0) + ' 条）' }];
+            },
+        },
+        execute: async (args, exec) => {
+            const a = (args ?? {}) as {
+                ids?: unknown; query?: unknown; containerTag?: unknown;
+                dryRun?: unknown; threshold?: unknown; maxForget?: unknown; reason?: unknown;
+            };
+            const ids = Array.isArray(a.ids)
+                ? a.ids
+                    .filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+                    .map((x) => x.trim())
+                : [];
+            const query = argString(a.query, '');
+            if (ids.length === 0 && !query) {
+                throw new Error('supermemory_forget: provide either ids (non-empty array) or query (non-empty string)');
+            }
+            if (ids.length > 500) throw new Error('supermemory_forget: at most 500 ids');
+            const tag = argString(a.containerTag, DEFAULT_CONTAINER);
+            const dryRun = a.dryRun === true;
+            const rawThreshold = typeof a.threshold === 'number' && Number.isFinite(a.threshold) ? a.threshold : 0.5;
+            const threshold = Math.min(1, Math.max(0, rawThreshold));
+            const rawMax = typeof a.maxForget === 'number' && Number.isFinite(a.maxForget) ? Math.floor(a.maxForget) : 100;
+            const maxForget = Math.min(500, Math.max(1, rawMax));
+            const reason = argString(a.reason, '');
+            const { base, apiKey } = requireUpstream(scope);
+            const body: Record<string, unknown> = { containerTag: tag, dryRun, threshold, maxForget };
+            if (ids.length > 0) body.ids = ids;
+            if (query) body.query = query;
+            if (reason) body.reason = reason;
+            const res = await fetch(base + '/v4/memories/forget-matching', {
+                method: 'POST',
+                headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
+                body: JSON.stringify(body),
+                signal: exec.signal,
+            });
+            if (!res.ok) {
+                throw new Error('supermemory /v4/memories/forget-matching failed: HTTP ' + res.status + ' — ' + (await res.text()).slice(0, 200));
+            }
+            const data = (await res.json()) as {
+                dryRun?: boolean; count?: number; forgetBatchId?: string | null; summary?: string;
+            };
+            return {
+                dryRun: data.dryRun === true,
+                count: typeof data.count === 'number' ? data.count : 0,
+                forgetBatchId: data.forgetBatchId ?? '',
+                summary: data.summary ?? '',
+            };
+        },
+        timeoutMs: 30000,
+    };
+}
+
 function apply(ctx: Context): void {
     // "supermemory" settings namespace: dsh rc.7 renders it as a settings card
     // (the client half registers the slot entry); `applies: 'live'` means card
@@ -395,6 +512,7 @@ function apply(ctx: Context): void {
             // configured key — same credential source as the proxy routes).
             ctx.tools.register(makeSearchTool(scope)),
             ctx.tools.register(makeSaveTool(scope)),
+            ctx.tools.register(makeForgetTool(scope)),
         ];
         return () => disposers.forEach((dispose) => dispose());
     }, 'dsh-supermemory: proxy + health + config + memory tools');
