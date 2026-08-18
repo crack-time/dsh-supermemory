@@ -1,0 +1,19 @@
+# 系统文件
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+
+# 编辑器
+.vscode/
+.idea/
+
+# 日志
+*.log
+
+# 依赖
+node_modules/
+.pnpm-store/
+
+# 构建中间产物
+*.tsbuildinfo

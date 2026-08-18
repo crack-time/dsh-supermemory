@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-supermemory
+      name: '@crack/dsh-supermemory'
