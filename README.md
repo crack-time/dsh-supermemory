@@ -20,6 +20,14 @@
 - `GET /health` —— 当前配置 + 对上游 `/v3/settings` 的可达性探测
 - `GET /config`、`POST /config`（`{ patch }` 合并，schemastery 校验）—— 设置读写
 
+### AI 记忆工具（原生 dsh 工具，无需 MCP）
+插件 host 端直接把两个工具注册进 dsh 工具运行时（与 `run_code` / `web_search` 同一套机制），**只服务 dsh**：
+
+- `supermemory_search` —— 语义检索记忆库（跨语言），把相关记忆带回对话
+- `supermemory_save` —— 把实体化事实写入记忆库，实时生成向量、立即可搜
+
+两个工具 host 端直连上游并注入配置的 API Key（与代理同一密钥源，无第二处凭据），模型不接触密钥。**不需要 MCP**：工具只在 dsh 内使用，MCP 桥只在需要跨客户端（Claude/Cursor 等）共享记忆时才值得引入。
+
 ## 安装
 
 插件通过符号链接安装到 dsh web profile（**lib/ 已随仓库提交，clone 即用，无需构建**）：
