@@ -873,6 +873,9 @@ async function persistTurn(
                 customId,
                 taskType: 'memory',
                 dreaming: 'dynamic',
+                // When this turn actually happened, so the memory engine resolves
+                // relative dates correctly (it would otherwise use ingestion time).
+                documentDate: new Date().toISOString(),
                 metadata: { sessionId: session.id, turn },
             }),
             signal: AbortSignal.timeout(20000),
