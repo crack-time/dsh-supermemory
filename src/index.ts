@@ -24,6 +24,15 @@
  * Both call the upstream directly with the configured Bearer key (the same
  * credential source as the proxy), so agents get memory without a browser
  * origin or any additional credential surface.
+ *
+ * Deterministic memory hooks (host-side):
+ *   session/created → fetch the stored profile and agent.inject() it as a
+ *     synthetic recall message, so every session starts already knowing the
+ *     user (one injection per session).
+ *   session/event (turn/end) → compose that finished turn's transcript and
+ *     POST it as a supermemory document (stable customId per session+turn),
+ *     letting the upstream memory engine extract facts automatically.
+ * Subagent sessions (delegationDepth > 0) are skipped for both hooks.
  */
 import z from '@deepseek-ai/schemastery';
 import { settingsNamespace } from '@deepseek-ai/dsh-settings';
@@ -34,6 +43,11 @@ import type {} from '@deepseek-ai/dsh-host-webserver';
 import type { Context } from '@deepseek-ai/cordis';
 // Loads dsh-tools' Context declaration merge (ctx.tools) and the ToolDefinition type.
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
+// Runtime helper that builds an identified user-role message for agent.inject().
+import { createUserMessage } from '@deepseek-ai/dsh-llm';
+// Type-only merges: ctx.agents (dsh-agent-loop) and the Session shape (dsh-session).
+import type {} from '@deepseek-ai/dsh-agent-loop';
+import type { Session } from '@deepseek-ai/dsh-session';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 const API_PREFIX = '/plugins/@crack/dsh-supermemory/api';
@@ -51,8 +65,8 @@ const SUPERMEMORY_SCHEMA = z.object({
     apiKey: z.string().default(''),
 });
 
-/** Required services: the web route registry, the user-settings seam, and the tool registry. */
-const inject = ['webServer', 'settings', 'tools'];
+/** Required services: the web route registry, the user-settings seam, the tool registry, and the agent factory (for context injection). */
+const inject = ['webServer', 'settings', 'tools', 'agents'];
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
     const text = JSON.stringify(body);
@@ -494,6 +508,139 @@ function makeForgetTool(scope: SettingsScope<any>): ToolDefinition {
     };
 }
 
+/**
+ * Extract the plain-text segments from a message's content blocks.
+ */
+function messageText(content: readonly unknown[]): string {
+    return content
+        .map((block): string => {
+            const b = block as { type?: string; text?: string; content?: unknown };
+            if (typeof b.text === 'string' && b.text.length > 0) return b.text;
+            if (typeof b.content === 'string' && b.content.length > 0) return b.content;
+            return '';
+        })
+        .filter((text) => text.length > 0)
+        .join('\n');
+}
+
+/**
+ * Compose the transcript of one finished turn into a self-contained document:
+ * the real user message(s) plus the assistant replies and tool calls that were
+ * produced after this turn's turn/start. Injected/synthetic user messages
+ * (source.kind !== 'user') are excluded so we never persist harness noise.
+ */
+function turnTranscript(session: Session, turn: number, maxChars = 6000): string {
+    const events = session.events;
+    const start = events.findIndex(
+        (e) => e.type === 'turn/start' && (e.data as { turn: number }).turn === turn,
+    );
+    if (start < 0) return '';
+    const parts: string[] = [];
+    for (let index = start; index < events.length; index += 1) {
+        const e = events[index];
+        if (!e) continue;
+        if (e.type === 'turn/end') break;
+        if (e.type === 'user/message') {
+            const source = (e.data as { source?: { kind?: string } }).source;
+            if (source?.kind !== 'user') continue;
+            const text = messageText((e.data as { content: readonly unknown[] }).content);
+            if (text.length > 0) parts.push('User:\n' + text);
+        }
+        else if (e.type === 'assistant/message') {
+            const text = messageText(
+                (e.data as { message: { content: readonly unknown[] } }).message.content,
+            );
+            if (text.length > 0) parts.push('Assistant:\n' + text);
+        }
+        else if (e.type === 'tool/call') {
+            const d = e.data as { name: string; arguments: string };
+            parts.push('[tool] ' + d.name + '(' + d.arguments + ')');
+        }
+    }
+    const text = parts.join('\n\n').trim();
+    return text.length > maxChars ? text.slice(0, maxChars) : text;
+}
+
+/** Fetch the stored profile (static + dynamic facts) for the default container. */
+async function fetchProfile(scope: SettingsScope<any>): Promise<string> {
+    const { base, apiKey } = requireUpstream(scope);
+    const res = await fetch(base + '/v4/profile', {
+        method: 'POST',
+        headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
+        body: JSON.stringify({ containerTag: DEFAULT_CONTAINER }),
+        signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return '';
+    const data = (await res.json()) as { profile?: { static?: string[]; dynamic?: string[] } };
+    const lines: string[] = [];
+    const stat = data.profile?.static ?? [];
+    const dyn = data.profile?.dynamic ?? [];
+    if (stat.length > 0) lines.push('长期事实 (static):\n- ' + stat.join('\n- '));
+    if (dyn.length > 0) lines.push('近期动态 (dynamic):\n- ' + dyn.join('\n- '));
+    return lines.join('\n\n');
+}
+
+/** Inject recall context into the session's agent as a synthetic user message. */
+function injectContext(ctx: Context, session: Session, text: string): void {
+    const agent = ctx.agents.get(session.id);
+    if (!agent) return;
+    try {
+        agent.inject(createUserMessage({
+            content: [{ type: 'text', text: '\u3010记忆上下文（来自本地 supermemory）\u3011\n' + text }],
+            source: { kind: 'plugin', plugin: '@crack/dsh-supermemory', form: 'recall' },
+        }));
+    }
+    catch (error) {
+        ctx.logger.warn('supermemory context inject:', error);
+    }
+}
+
+/** Persist one finished turn as a supermemory document (fire-and-forget). */
+async function persistTurn(
+    ctx: Context,
+    scope: SettingsScope<any>,
+    session: Session,
+    turn: number,
+    text: string,
+): Promise<void> {
+    try {
+        const { base, apiKey } = requireUpstream(scope);
+        const customId = (session.id + '-turn-' + turn)
+            .replace(/[^A-Za-z0-9_.-]/g, '-')
+            .slice(0, 100);
+        const res = await fetch(base + '/v3/documents', {
+            method: 'POST',
+            headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
+            body: JSON.stringify({
+                content: text,
+                containerTag: DEFAULT_CONTAINER,
+                customId,
+                taskType: 'memory',
+                dreaming: 'dynamic',
+                metadata: { sessionId: session.id, turn },
+            }),
+            signal: AbortSignal.timeout(20000),
+        });
+        if (!res.ok) {
+            ctx.logger.warn(
+                'supermemory turn persist: HTTP ' + res.status + ' ' + (await res.text()).slice(0, 200),
+            );
+        }
+    }
+    catch (error) {
+        ctx.logger.warn('supermemory turn persist:', error);
+    }
+}
+
+/** Skip subagent sessions for both hooks. */
+function isSubagent(session: Session): boolean {
+    return session.header.origin === 'subagent'
+        || (session.header.delegationDepth ?? 0) > 0;
+}
+
+/** Sessions that already received a profile injection (one per session). */
+const injectedSessions = new Set<string>();
+
 function apply(ctx: Context): void {
     // "supermemory" settings namespace: dsh rc.7 renders it as a settings card
     // (the client half registers the slot entry); `applies: 'live'` means card
@@ -513,6 +660,26 @@ function apply(ctx: Context): void {
             ctx.tools.register(makeSearchTool(scope)),
             ctx.tools.register(makeSaveTool(scope)),
             ctx.tools.register(makeForgetTool(scope)),
+            // Deterministic read: inject the stored profile at session start.
+            ctx.on('session/created', (session) => {
+                if (isSubagent(session)) return;
+                if (injectedSessions.has(session.id)) return;
+                injectedSessions.add(session.id);
+                fetchProfile(scope)
+                    .then((text) => {
+                        if (text) injectContext(ctx, session, text);
+                    })
+                    .catch((error) => ctx.logger.warn('supermemory profile inject:', error));
+            }),
+            // Deterministic write: persist each finished turn.
+            ctx.on('session/event', (session, event) => {
+                if (event.type !== 'turn/end') return;
+                if (isSubagent(session)) return;
+                const turn = (event.data as { turn: number }).turn;
+                const transcript = turnTranscript(session, turn);
+                if (!transcript) return;
+                void persistTurn(ctx, scope, session, turn, transcript);
+            }),
         ];
         return () => disposers.forEach((dispose) => dispose());
     }, 'dsh-supermemory: proxy + health + config + memory tools');
