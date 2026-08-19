@@ -33,6 +33,7 @@ export declare const CARD_LOCALE: {
         openaiModel: string;
         managedStatus: string;
         mgtUnmanaged: string;
+        mgtNoPath: string;
         mgtExternal: string;
         mgtRunning: string;
         mgtStarting: string;
@@ -77,6 +78,7 @@ export declare const CARD_LOCALE: {
         openaiModel: string;
         managedStatus: string;
         mgtUnmanaged: string;
+        mgtNoPath: string;
         mgtExternal: string;
         mgtRunning: string;
         mgtStarting: string;

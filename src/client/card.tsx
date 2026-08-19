@@ -50,6 +50,7 @@ export const CARD_LOCALE = {
         openaiModel: 'OPENAI_MODEL',
         managedStatus: '托管状态',
         mgtUnmanaged: '未启用托管',
+        mgtNoPath: '请先填写服务器可执行文件路径并保存',
         mgtExternal: '已在运行（外部实例，未重复拉起）',
         mgtRunning: '托管运行中',
         mgtStarting: '启动中…',
@@ -94,6 +95,7 @@ export const CARD_LOCALE = {
         openaiModel: 'OPENAI_MODEL',
         managedStatus: 'Managed state',
         mgtUnmanaged: 'Not managed',
+        mgtNoPath: 'Set the server executable path and save first',
         mgtExternal: 'Already running (external instance, not re-launched)',
         mgtRunning: 'Managed & running',
         mgtStarting: 'Starting…',
@@ -546,6 +548,7 @@ export function SupermemorySettingsCard(props: CardProps) {
         if (!m) return null;
         switch (m.state) {
             case 'unmanaged': return txt('mgtUnmanaged');
+            case 'no-path': return txt('mgtNoPath');
             case 'external': return txt('mgtExternal');
             case 'running': return txt('mgtRunning') + (m.pid ? ' · PID ' + m.pid : '');
             case 'starting': return txt('mgtStarting');
@@ -678,7 +681,7 @@ export function SupermemorySettingsCard(props: CardProps) {
                             className={cn(
                                 'sm-settings-status',
                                 managed?.state === 'running' && 'sm-settings-status-ok',
-                                (managed?.state === 'error' || managed?.state === 'missing-exe') && 'sm-settings-status-err',
+                                (managed?.state === 'error' || managed?.state === 'missing-exe' || managed?.state === 'no-path') && 'sm-settings-status-err',
                             )}
                         >
                             {txt('managedStatus')}: {mgtText(managed) ?? '—'}

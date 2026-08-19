@@ -131,7 +131,8 @@ function resolveConfig(scope: SettingsScope<any>): SupermemoryConfig {
  * `external` and left alone — avoids double-writers on the same data dir).
  */
 type ManagedState =
-    | 'unmanaged'      // manageServer off or serverPath empty
+    | 'unmanaged'      // manageServer off
+    | 'no-path'       // manageServer on but serverPath empty (waiting for the card)
     | 'external'      // an instance already answers at baseUrl (not ours)
     | 'running'       // our spawned child is alive
     | 'starting'      // spawned, pid not yet bound (transient)
@@ -188,9 +189,14 @@ class ManagedServer {
      */
     async sync(scope: SettingsScope<any>, ctx: Context): Promise<void> {
         const cfg = resolveConfig(scope);
-        if (!cfg.manageServer || !cfg.serverPath.trim()) {
+        if (!cfg.manageServer) {
             if (this.child && this.child.exitCode === null) await this.stop(ctx);
-            this.info = { enabled: !!cfg.manageServer, state: 'unmanaged' };
+            this.info = { enabled: false, state: 'unmanaged' };
+            return;
+        }
+        if (!cfg.serverPath.trim()) {
+            if (this.child && this.child.exitCode === null) await this.stop(ctx);
+            this.info = { enabled: true, state: 'no-path' };
             return;
         }
         const sig = this.signature(cfg);
@@ -218,8 +224,12 @@ class ManagedServer {
         opts: { skipProbe?: boolean } = {},
     ): Promise<void> {
         const cfg = resolveConfig(scope);
-        if (!cfg.manageServer || !cfg.serverPath.trim()) {
-            this.info = { enabled: !!cfg.manageServer, state: 'unmanaged' };
+        if (!cfg.manageServer) {
+            this.info = { enabled: false, state: 'unmanaged' };
+            return;
+        }
+        if (!cfg.serverPath.trim()) {
+            this.info = { enabled: true, state: 'no-path' };
             return;
         }
         if (this.child && this.child.exitCode === null) {
@@ -314,8 +324,12 @@ class ManagedServer {
     /** Manual "start / restart" from the card: restart our child, or spawn if none. */
     async ensureStarted(scope: SettingsScope<any>, ctx: Context): Promise<ManagedSnapshot> {
         const cfg = resolveConfig(scope);
-        if (!cfg.manageServer || !cfg.serverPath.trim()) {
-            this.info = { enabled: !!cfg.manageServer, state: 'unmanaged' };
+        if (!cfg.manageServer) {
+            this.info = { enabled: false, state: 'unmanaged' };
+            return this.snapshot();
+        }
+        if (!cfg.serverPath.trim()) {
+            this.info = { enabled: true, state: 'no-path' };
             return this.snapshot();
         }
         if (this.child && this.child.exitCode === null) {
