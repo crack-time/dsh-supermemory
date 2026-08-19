@@ -49,6 +49,10 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import type {} from '@deepseek-ai/dsh-agent-loop';
 import type { Session } from '@deepseek-ai/dsh-session';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
+import { dirname } from 'node:path';
+import { statSync } from 'node:fs';
 
 const API_PREFIX = '/plugins/@crack/dsh-supermemory/api';
 const DEFAULT_BASE_URL = 'http://localhost:6767';
@@ -57,12 +61,24 @@ const DEFAULT_BASE_URL = 'http://localhost:6767';
 interface SupermemoryConfig {
     baseUrl: string;
     apiKey: string;
+    /** Managed local server: start/stop supermemory-server alongside dsh web. */
+    manageServer: boolean;
+    serverPath: string;
+    openaiApiKey: string;
+    openaiBaseUrl: string;
+    openaiModel: string;
 }
 
 /** Settings namespace schema: where to reach the local Supermemory server. */
 const SUPERMEMORY_SCHEMA = z.object({
     baseUrl: z.string().default(DEFAULT_BASE_URL),
     apiKey: z.string().default(''),
+    // Managed local server: start/stop supermemory-server alongside dsh web.
+    manageServer: z.boolean().default(false),
+    serverPath: z.string().default(''),
+    openaiApiKey: z.string().default(''),
+    openaiBaseUrl: z.string().default('https://token-plan-cn.xiaomimimo.com/v1'),
+    openaiModel: z.string().default('mimo-v2.5'),
 });
 
 /** Required services: the web route registry, the user-settings seam, the tool registry, and the agent factory (for context injection). */
@@ -99,7 +115,246 @@ function resolveConfig(scope: SettingsScope<any>): SupermemoryConfig {
     return {
         baseUrl: (value?.baseUrl as string | undefined) ?? DEFAULT_BASE_URL,
         apiKey: (value?.apiKey as string | undefined) ?? '',
+        manageServer: (value?.manageServer as boolean | undefined) ?? false,
+        serverPath: (value?.serverPath as string | undefined) ?? '',
+        openaiApiKey: (value?.openaiApiKey as string | undefined) ?? '',
+        openaiBaseUrl: (value?.openaiBaseUrl as string | undefined) ?? 'https://token-plan-cn.xiaomimimo.com/v1',
+        openaiModel: (value?.openaiModel as string | undefined) ?? 'mimo-v2.5',
     };
+}
+
+
+/**
+ * Modest manager for a locally-spawned supermemory server process, tied to the
+ * dsh web plugin lifecycle: spawn on activation, kill on dispose. Never touches
+ * a server it did not spawn (an externally-running instance is reported as
+ * `external` and left alone — avoids double-writers on the same data dir).
+ */
+type ManagedState =
+    | 'unmanaged'      // manageServer off or serverPath empty
+    | 'external'      // an instance already answers at baseUrl (not ours)
+    | 'running'       // our spawned child is alive
+    | 'starting'      // spawned, pid not yet bound (transient)
+    | 'stopped'       // previously spawned, now stopped/crashed
+    | 'missing-exe'   // configured exe path does not exist
+    | 'error';        // spawn threw
+
+interface ManagedSnapshot {
+    enabled: boolean;
+    state: ManagedState;
+    pid?: number;
+    source?: 'spawned' | 'external';
+    exe?: string;
+    error?: string;
+    stderrTail?: string;
+}
+
+class ManagedServer {
+    private child: ChildProcess | undefined;
+    private info: ManagedSnapshot = { enabled: false, state: 'unmanaged' };
+    private lastSig = '';
+
+    snapshot(): ManagedSnapshot {
+        return { ...this.info };
+    }
+
+    private signature(cfg: SupermemoryConfig): string {
+        return [
+            cfg.serverPath,
+            cfg.openaiBaseUrl,
+            cfg.openaiModel,
+            cfg.openaiApiKey,
+        ].join('|');
+    }
+
+    /** Is the configured base URL already reachable (health probe against upstream /v3/settings). */
+    private async probe(cfg: SupermemoryConfig): Promise<boolean> {
+        try {
+            const res = await fetch(upstreamBase(cfg) + '/v3/settings', {
+                headers: { authorization: 'Bearer ' + cfg.apiKey },
+                signal: AbortSignal.timeout(2500),
+            });
+            return res.ok;
+        }
+        catch {
+            return false;
+        }
+    }
+
+    /**
+     * Reconcile with current config: shutdown when unmanaged, (re)start when
+     * config/path/model changed, keep running otherwise. Called on activation
+     * and after every config save.
+     */
+    async sync(scope: SettingsScope<any>, ctx: Context): Promise<void> {
+        const cfg = resolveConfig(scope);
+        if (!cfg.manageServer || !cfg.serverPath.trim()) {
+            if (this.child && this.child.exitCode === null) await this.stop(ctx);
+            this.info = { enabled: !!cfg.manageServer, state: 'unmanaged' };
+            return;
+        }
+        const sig = this.signature(cfg);
+        if (this.child && this.child.exitCode === null) {
+            if (this.lastSig === sig) return; // healthy + unchanged
+            await this.stop(ctx); // config changed -> restart with new env
+            this.lastSig = sig;
+            // We just killed our own process: skip the reachability probe (the
+            // old listening socket may linger briefly and look "external").
+            await this.start(scope, ctx, { skipProbe: true });
+        }
+        else {
+            this.lastSig = sig;
+            await this.start(scope, ctx);
+        }
+    }
+
+    /**
+     * Launch the managed process. Skips when already running or when an
+     * external instance answers (unless `skipProbe`). Safe to call repeatedly.
+     */
+    async start(
+        scope: SettingsScope<any>,
+        ctx: Context,
+        opts: { skipProbe?: boolean } = {},
+    ): Promise<void> {
+        const cfg = resolveConfig(scope);
+        if (!cfg.manageServer || !cfg.serverPath.trim()) {
+            this.info = { enabled: !!cfg.manageServer, state: 'unmanaged' };
+            return;
+        }
+        if (this.child && this.child.exitCode === null) {
+            this.info = { enabled: true, state: 'running', pid: this.child.pid, source: 'spawned' };
+            return;
+        }
+        const exePath = cfg.serverPath.trim();
+        try {
+            if (!statSync(exePath).isFile()) throw new Error('not a file');
+        }
+        catch {
+            this.info = { enabled: true, state: 'missing-exe', exe: exePath };
+            ctx.logger.warn('[supermemory] managed server exe not found: ' + exePath);
+            return;
+        }
+        if (!opts.skipProbe && (await this.probe(cfg))) {
+            this.info = { enabled: true, state: 'external', exe: exePath, source: 'external' };
+            return;
+        }
+        try {
+            const child = spawn(exePath, [], {
+                cwd: dirname(exePath),
+                env: {
+                    ...process.env,
+                    OPENAI_API_KEY: cfg.openaiApiKey,
+                    OPENAI_BASE_URL: cfg.openaiBaseUrl,
+                    OPENAI_MODEL: cfg.openaiModel,
+                },
+                windowsHide: true,
+                stdio: ['ignore', 'pipe', 'pipe'],
+            });
+            this.child = child;
+            const onLog = (stream: NodeJS.ReadableStream | null, tag: 'stdout' | 'stderr') => {
+                if (!stream) return;
+                stream.on('data', (buf: Buffer) => {
+                    const line = String(buf).trim();
+                    if (!line) return;
+                    if (tag === 'stderr') {
+                        this.info = { ...this.info, stderrTail: (this.info.stderrTail ?? '') + '\n' + line.slice(-400) };
+                        if ((this.info.stderrTail?.length ?? 0) > 1200) {
+                            this.info.stderrTail = this.info.stderrTail!.slice(-1200);
+                        }
+                        ctx.logger.debug('[supermemory server] ' + line);
+                    }
+                    else {
+                        ctx.logger.debug('[supermemory server] ' + line);
+                    }
+                });
+            };
+            onLog(child.stdout, 'stdout');
+            onLog(child.stderr, 'stderr');
+            child.on('exit', (code, signal) => {
+                if (this.child !== child) return;
+                this.child = undefined;
+                ctx.logger.info(
+                    '[supermemory] managed server exited code=' + code + ' signal=' + String(signal),
+                );
+                this.info = {
+                    enabled: true,
+                    state: 'stopped',
+                    ...(this.info.pid ? { pid: this.info.pid } : {}),
+                    exe: exePath,
+                    error: code !== 0 ? 'server exited with code ' + code : undefined,
+                };
+            });
+            child.on('error', (error) => {
+                if (this.child !== child) return;
+                this.child = undefined;
+                this.info = { enabled: true, state: 'error', exe: exePath, error: error.message };
+                ctx.logger.warn('[supermemory] managed server spawn error: ' + error.message);
+            });
+            this.info = {
+                enabled: true,
+                state: child.pid ? 'running' : 'starting',
+                pid: child.pid ?? undefined,
+                source: 'spawned',
+                exe: exePath,
+            };
+            ctx.logger.info('[supermemory] managed server spawned pid=' + child.pid + ' exe=' + exePath);
+        }
+        catch (error) {
+            this.info = {
+                enabled: true,
+                state: 'error',
+                exe: exePath,
+                error: error instanceof Error ? error.message : String(error),
+            };
+            ctx.logger.warn('[supermemory] managed server spawn:', error);
+        }
+    }
+
+    /** Manual "start / restart" from the card: restart our child, or spawn if none. */
+    async ensureStarted(scope: SettingsScope<any>, ctx: Context): Promise<ManagedSnapshot> {
+        const cfg = resolveConfig(scope);
+        if (!cfg.manageServer || !cfg.serverPath.trim()) {
+            this.info = { enabled: !!cfg.manageServer, state: 'unmanaged' };
+            return this.snapshot();
+        }
+        if (this.child && this.child.exitCode === null) {
+            await this.stop(ctx);
+            this.lastSig = this.signature(cfg);
+            await this.start(scope, ctx, { skipProbe: true });
+        }
+        else {
+            await this.start(scope, ctx);
+        }
+        return this.snapshot();
+    }
+
+    /** Kill only the process tree this plugin spawned. Never touches external instances. */
+    async stop(ctx: Context): Promise<ManagedSnapshot> {
+        const child = this.child;
+        this.child = undefined;
+        if (child && child.pid) {
+            const pid = child.pid;
+            try { child.kill(); } catch { /* already dead */ }
+            // Windows: guarantee the whole tree dies even if the exe spawned children.
+            const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
+                windowsHide: true,
+                stdio: 'ignore',
+            });
+            killer.on('error', () => { /* taskkill may be unavailable — child.kill already ran */ });
+            ctx.logger.info('[supermemory] managed server stopping pid=' + pid);
+            this.info = {
+                enabled: this.info.enabled,
+                state: 'stopped',
+                pid,
+                exe: this.info.exe,
+            };
+        }
+        else {
+            this.info = { ...this.info, state: 'stopped' };
+        }
+        return this.snapshot();
+    }
 }
 
 /** Health probe: report configuration + whether the upstream answers. */
@@ -191,13 +446,15 @@ async function handleApi(
     scope: SettingsScope<any>,
     req: IncomingMessage,
     res: ServerResponse,
+    managed: ManagedServer,
 ): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://dsh.local');
     const pathname = url.pathname;
     const method = req.method ?? 'GET';
     try {
         if (method === 'GET' && pathname === API_PREFIX + '/health') {
-            return sendJson(res, 200, await health(scope));
+            const base = await health(scope);
+            return sendJson(res, 200, { ...base, managed: managed.snapshot() });
         }
         if (method === 'GET' && pathname === API_PREFIX + '/config') {
             return sendJson(res, 200, resolveConfig(scope));
@@ -208,7 +465,14 @@ async function handleApi(
                 return sendJson(res, 400, { error: 'patch (object) required' });
             }
             await scope.update(body.patch);
+            await managed.sync(scope, ctx); // reconcile the managed process after save
             return sendJson(res, 200, resolveConfig(scope));
+        }
+        if (method === 'POST' && pathname === API_PREFIX + '/server/start') {
+            return sendJson(res, 200, { ok: true, managed: await managed.ensureStarted(scope, ctx) });
+        }
+        if (method === 'POST' && pathname === API_PREFIX + '/server/stop') {
+            return sendJson(res, 200, { ok: true, managed: await managed.stop(ctx) });
         }
         // Everything else: reverse proxy to the upstream Supermemory server.
         return await proxy(ctx, scope, req, res);
@@ -648,12 +912,17 @@ function apply(ctx: Context): void {
     const scope = ctx.settings.register(settingsNamespace('supermemory'), SUPERMEMORY_SCHEMA, {
         applies: 'live',
     });
+    // Managed local server: spawn alongside dsh web, kill on dispose.
+    const managed = new ManagedServer();
     ctx.effect(() => {
+        // Start (or adopt) the managed server when this plugin activates —
+        // i.e. when dsh web boots and loads the plugin.
+        void managed.sync(scope, ctx);
         const disposers = [
             ctx.webServer.register({
                 kind: 'prefix',
                 path: API_PREFIX,
-                handler: (req, res) => handleApi(ctx, scope, req, res),
+                handler: (req, res) => handleApi(ctx, scope, req, res, managed),
             }),
             // AI-facing memory tools (host-side, direct to upstream with the
             // configured key — same credential source as the proxy routes).
@@ -681,7 +950,11 @@ function apply(ctx: Context): void {
                 void persistTurn(ctx, scope, session, turn, transcript);
             }),
         ];
-        return () => disposers.forEach((dispose) => dispose());
+        return () => {
+            // dsh web is stopping: tear down the managed server process tree.
+            void managed.stop(ctx);
+            disposers.forEach((dispose) => dispose());
+        };
     }, 'dsh-supermemory: proxy + health + config + memory tools');
 }
 

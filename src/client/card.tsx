@@ -41,6 +41,25 @@ export const CARD_LOCALE = {
         checking: '检查中…',
         loadFailed: '读取配置失败',
         emptyKey: '未配置 API Key',
+        manageServer: '随 dsh 自动启动/停止记忆服务',
+        manageServerHint: '开启后 dsh web 启动时自动拉起服务器、停止时销毁进程；关闭则沿用手动 bat 启动',
+        serverPath: '服务器可执行文件路径',
+        serverPathHint: '例：C:\\Users\\crack\\Supermemory\\supermemory-server-windows-x64.exe',
+        openaiApiKey: 'OPENAI_API_KEY（记忆引擎模型密钥）',
+        openaiBaseUrl: 'OPENAI_BASE_URL',
+        openaiModel: 'OPENAI_MODEL',
+        managedStatus: '托管状态',
+        mgtUnmanaged: '未启用托管',
+        mgtExternal: '已在运行（外部实例，未重复拉起）',
+        mgtRunning: '托管运行中',
+        mgtStarting: '启动中…',
+        mgtStopped: '未启动',
+        mgtMissingExe: '可执行文件缺失',
+        mgtError: '启动失败',
+        serverStart: '启动/重启托管',
+        serverStop: '停止托管',
+        serverBusy: '处理中…',
+        serverActionFailed: '操作失败',
     },
     en: {
         title: 'Supermemory proxy',
@@ -66,6 +85,25 @@ export const CARD_LOCALE = {
         checking: 'Checking…',
         loadFailed: 'Failed to read configuration',
         emptyKey: 'API key not configured',
+        manageServer: 'Start/stop the server with dsh',
+        manageServerHint: 'Launch the server when dsh web starts and kill it on stop; disable to keep the manual .bat workflow',
+        serverPath: 'Server executable path',
+        serverPathHint: 'e.g. C:\\Users\\crack\\Supermemory\\supermemory-server-windows-x64.exe',
+        openaiApiKey: 'OPENAI_API_KEY (memory-engine model key)',
+        openaiBaseUrl: 'OPENAI_BASE_URL',
+        openaiModel: 'OPENAI_MODEL',
+        managedStatus: 'Managed state',
+        mgtUnmanaged: 'Not managed',
+        mgtExternal: 'Already running (external instance, not re-launched)',
+        mgtRunning: 'Managed & running',
+        mgtStarting: 'Starting…',
+        mgtStopped: 'Not running',
+        mgtMissingExe: 'Executable missing',
+        mgtError: 'Failed to start',
+        serverStart: 'Start / restart managed',
+        serverStop: 'Stop managed',
+        serverBusy: 'Working…',
+        serverActionFailed: 'Action failed',
     },
 };
 
@@ -74,11 +112,25 @@ type CardTextKey = keyof typeof CARD_LOCALE.zh;
 interface CardState {
     baseUrl: string;
     apiKey: string;
+    manageServer: boolean;
+    serverPath: string;
+    openaiApiKey: string;
+    openaiBaseUrl: string;
+    openaiModel: string;
+}
+
+interface ManagedStatus {
+    enabled?: boolean;
+    state?: string;
+    pid?: number;
+    exe?: string;
+    error?: string;
+    stderrTail?: string;
 }
 
 interface CardProps {
     t?: (key: string) => string;
-    applyPatch?: (patch: Record<string, string>) => Promise<{ ok: boolean; error?: string }>;
+    applyPatch?: (patch: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }>;
 }
 
 interface Status {
@@ -260,6 +312,28 @@ export const CARD_CSS = `
   opacity: 0.55;
   cursor: default;
 }
+[data-supermemory-settings] .sm-settings-check {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 8px;
+}
+[data-supermemory-settings] .sm-settings-check input[type="checkbox"] {
+  width: auto;
+  height: auto;
+  margin-top: 3px;
+  accent-color: var(--dsw-alias-brand-primary);
+  cursor: pointer;
+}
+[data-supermemory-settings] .sm-settings-hint.sm-settings-block {
+  display: block;
+  margin-top: 2px;
+}
+[data-supermemory-settings] .sm-settings-serverrow {
+  align-items: center;
+  gap: 8px;
+  display: flex;
+  flex-wrap: wrap;
+}
 `;
 
 let cssInjected = false;
@@ -309,6 +383,14 @@ export function SupermemorySettingsCard(props: CardProps) {
     const [loading, setLoading] = useState(false);
     const [baseUrl, setBaseUrl] = useState('');
     const [apiKey, setApiKey] = useState('');
+    const [manageServer, setManageServer] = useState(false);
+    const [serverPath, setServerPath] = useState('');
+    const [openaiApiKey, setOpenaiApiKey] = useState('');
+    const [openaiBaseUrl, setOpenaiBaseUrl] = useState('');
+    const [openaiModel, setOpenaiModel] = useState('');
+    const [managed, setManaged] = useState<ManagedStatus | null>(null);
+    const [serverBusy, setServerBusy] = useState(false);
+    const [serverActionErr, setServerActionErr] = useState(false);
     const [server, setServer] = useState<CardState | null>(null);
     const [saving, setSaving] = useState(false);
     const [saveFailed, setSaveFailed] = useState(false);
@@ -318,7 +400,13 @@ export function SupermemorySettingsCard(props: CardProps) {
     const [loadErr, setLoadErr] = useState(false);
 
     const dirty = server !== null &&
-        (baseUrl.trim() !== server.baseUrl || apiKey.trim() !== server.apiKey);
+        (baseUrl.trim() !== server.baseUrl ||
+            apiKey.trim() !== server.apiKey ||
+            manageServer !== server.manageServer ||
+            serverPath.trim() !== server.serverPath ||
+            openaiApiKey.trim() !== server.openaiApiKey ||
+            openaiBaseUrl.trim() !== server.openaiBaseUrl ||
+            openaiModel.trim() !== server.openaiModel);
 
     async function load() {
         setLoadErr(false);
@@ -329,8 +417,27 @@ export function SupermemorySettingsCard(props: CardProps) {
             const cfg = (await res.json()) as CardState;
             setBaseUrl(cfg.baseUrl ?? '');
             setApiKey(cfg.apiKey ?? '');
-            setServer({ baseUrl: cfg.baseUrl ?? '', apiKey: cfg.apiKey ?? '' });
+            setManageServer(cfg.manageServer === true);
+            setServerPath(cfg.serverPath ?? '');
+            setOpenaiApiKey(cfg.openaiApiKey ?? '');
+            setOpenaiBaseUrl(cfg.openaiBaseUrl ?? '');
+            setOpenaiModel(cfg.openaiModel ?? '');
+            setServer({
+                baseUrl: cfg.baseUrl ?? '',
+                apiKey: cfg.apiKey ?? '',
+                manageServer: cfg.manageServer === true,
+                serverPath: cfg.serverPath ?? '',
+                openaiApiKey: cfg.openaiApiKey ?? '',
+                openaiBaseUrl: cfg.openaiBaseUrl ?? '',
+                openaiModel: cfg.openaiModel ?? '',
+            });
+            setServerActionErr(false);
             setStatus(null);
+            // Best-effort fetch of the managed-process status.
+            fetch(HEALTH_URL, { cache: 'no-store' })
+                .then((r) => r.json().catch(() => ({})))
+                .then((h) => h?.managed && setManaged(h.managed as ManagedStatus))
+                .catch(() => { /* status is optional */ });
         }
         catch {
             setLoadErr(true);
@@ -347,15 +454,20 @@ export function SupermemorySettingsCard(props: CardProps) {
     }, [open]);
 
     async function commit() {
-        const patch: Record<string, string> = {};
+        const patch: Record<string, unknown> = {};
         if (baseUrl.trim() !== (server?.baseUrl ?? '')) patch.baseUrl = baseUrl.trim();
         if (apiKey.trim() !== (server?.apiKey ?? '')) patch.apiKey = apiKey.trim();
+        if (manageServer !== (server?.manageServer ?? false)) patch.manageServer = manageServer;
+        if (serverPath.trim() !== (server?.serverPath ?? '')) patch.serverPath = serverPath.trim();
+        if (openaiApiKey.trim() !== (server?.openaiApiKey ?? '')) patch.openaiApiKey = openaiApiKey.trim();
+        if (openaiBaseUrl.trim() !== (server?.openaiBaseUrl ?? '')) patch.openaiBaseUrl = openaiBaseUrl.trim();
+        if (openaiModel.trim() !== (server?.openaiModel ?? '')) patch.openaiModel = openaiModel.trim();
         if (Object.keys(patch).length === 0) return;
         setSaving(true);
         setSaveFailed(false);
         setJustSaved(false);
         try {
-            const apply = applyPatch ?? (async (p: Record<string, string>) => {
+            const apply = applyPatch ?? (async (p: Record<string, unknown>) => {
                 const res = await fetch(CONFIG_URL, {
                     method: 'POST',
                     headers: { 'content-type': 'application/json' },
@@ -372,9 +484,25 @@ export function SupermemorySettingsCard(props: CardProps) {
                 setSaveFailed(true);
             }
             else {
-                setServer((prev) => ({ ...(prev ?? { baseUrl: '', apiKey: '' }), ...patch }));
+                setServer((prev) => ({
+                    ...(prev ?? {
+                        baseUrl: '',
+                        apiKey: '',
+                        manageServer: false,
+                        serverPath: '',
+                        openaiApiKey: '',
+                        openaiBaseUrl: '',
+                        openaiModel: '',
+                    }),
+                    ...patch,
+                }));
                 setJustSaved(true);
                 setStatus({ kind: 'ok', text: txt('saved') });
+                // Config save reconciles the managed process — refresh its status.
+                fetch(HEALTH_URL, { cache: 'no-store' })
+                    .then((r) => r.json().catch(() => ({})))
+                    .then((h) => h?.managed && setManaged(h.managed as ManagedStatus))
+                    .catch(() => { /* optional */ });
             }
         }
         catch {
@@ -411,6 +539,38 @@ export function SupermemorySettingsCard(props: CardProps) {
         }
         finally {
             setTesting(false);
+        }
+    }
+
+    const mgtText = (m: ManagedStatus | null): string | null => {
+        if (!m) return null;
+        switch (m.state) {
+            case 'unmanaged': return txt('mgtUnmanaged');
+            case 'external': return txt('mgtExternal');
+            case 'running': return txt('mgtRunning') + (m.pid ? ' · PID ' + m.pid : '');
+            case 'starting': return txt('mgtStarting');
+            case 'stopped': return txt('mgtStopped');
+            case 'missing-exe': return txt('mgtMissingExe');
+            case 'error': return txt('mgtError') + (m.error ? ' · ' + m.error : '');
+            default: return m.state ?? '';
+        }
+    };
+
+    async function serverAction(which: 'start' | 'stop') {
+        setServerBusy(true);
+        setServerActionErr(false);
+        setStatus(null);
+        try {
+            const res = await fetch(CONFIG_URL.replace('/config', '/server/' + which), { method: 'POST' });
+            const data = (await res.json().catch(() => ({}))) as { ok?: boolean; managed?: ManagedStatus };
+            if (!res.ok || data.ok === false) setServerActionErr(true);
+            if (data.managed) setManaged(data.managed);
+        }
+        catch {
+            setServerActionErr(true);
+        }
+        finally {
+            setServerBusy(false);
         }
     }
 
@@ -461,6 +621,86 @@ export function SupermemorySettingsCard(props: CardProps) {
                         />
                         <span className="sm-settings-hint">{txt('apiKeyHint')}</span>
                     </label>
+                    <label className="sm-settings-row sm-settings-check">
+                        <input
+                            type="checkbox"
+                            checked={manageServer}
+                            onChange={(e) => setManageServer(e.target.checked)}
+                        />
+                        <span>
+                            <span className="sm-settings-label">{txt('manageServer')}</span>
+                            <span className="sm-settings-hint sm-settings-block">{txt('manageServerHint')}</span>
+                        </span>
+                    </label>
+                    <label className="sm-settings-row">
+                        <span className="sm-settings-label">{txt('serverPath')}</span>
+                        <input
+                            type="text"
+                            value={serverPath}
+                            placeholder="C:\Users\crack\Supermemory\supermemory-server-windows-x64.exe"
+                            spellCheck={false}
+                            onChange={(e) => setServerPath(e.target.value)}
+                        />
+                        <span className="sm-settings-hint">{txt('serverPathHint')}</span>
+                    </label>
+                    <label className="sm-settings-row">
+                        <span className="sm-settings-label">{txt('openaiApiKey')}</span>
+                        <input
+                            type="password"
+                            value={openaiApiKey}
+                            spellCheck={false}
+                            autoComplete="off"
+                            onChange={(e) => setOpenaiApiKey(e.target.value)}
+                        />
+                    </label>
+                    <label className="sm-settings-row">
+                        <span className="sm-settings-label">{txt('openaiBaseUrl')}</span>
+                        <input
+                            type="text"
+                            value={openaiBaseUrl}
+                            placeholder="https://token-plan-cn.xiaomimimo.com/v1"
+                            spellCheck={false}
+                            onChange={(e) => setOpenaiBaseUrl(e.target.value)}
+                        />
+                    </label>
+                    <label className="sm-settings-row">
+                        <span className="sm-settings-label">{txt('openaiModel')}</span>
+                        <input
+                            type="text"
+                            value={openaiModel}
+                            placeholder="mimo-v2.5"
+                            spellCheck={false}
+                            onChange={(e) => setOpenaiModel(e.target.value)}
+                        />
+                    </label>
+                    <div className="sm-settings-serverrow">
+                        <span
+                            className={cn(
+                                'sm-settings-status',
+                                managed?.state === 'running' && 'sm-settings-status-ok',
+                                (managed?.state === 'error' || managed?.state === 'missing-exe') && 'sm-settings-status-err',
+                            )}
+                        >
+                            {txt('managedStatus')}: {mgtText(managed) ?? '—'}
+                        </span>
+                        <button
+                            type="button"
+                            className="sm-settings-test"
+                            disabled={serverBusy}
+                            onClick={() => void serverAction('start')}
+                        >
+                            {serverBusy ? txt('serverBusy') : txt('serverStart')}
+                        </button>
+                        <button
+                            type="button"
+                            className="sm-settings-test"
+                            disabled={serverBusy}
+                            onClick={() => void serverAction('stop')}
+                        >
+                            {serverBusy ? txt('serverBusy') : txt('serverStop')}
+                        </button>
+                    </div>
+                    {serverActionErr ? <p className="sm-settings-failed" role="status">{txt('serverActionFailed')}</p> : null}
                     <div className="sm-settings-footer">
                         {statusText ? (
                             <span
@@ -497,7 +737,13 @@ export function SupermemorySettingsCard(props: CardProps) {
                             onClick={() => {
                                 setBaseUrl(server?.baseUrl ?? '');
                                 setApiKey(server?.apiKey ?? '');
+                                setManageServer(server?.manageServer ?? false);
+                                setServerPath(server?.serverPath ?? '');
+                                setOpenaiApiKey(server?.openaiApiKey ?? '');
+                                setOpenaiBaseUrl(server?.openaiBaseUrl ?? '');
+                                setOpenaiModel(server?.openaiModel ?? '');
                                 setSaveFailed(false);
+                                setServerActionErr(false);
                             }}
                         >
                             {txt('discard')}
