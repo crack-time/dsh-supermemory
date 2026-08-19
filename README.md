@@ -8,6 +8,7 @@
 - 在 GUI **设置 → 插件 → 插件配置** 页新增「Supermemory 代理」卡片，与内置 shell / agent-loop / web-search 卡片同款可折叠外观（设计令牌驱动，明暗主题自适应）
 - **服务地址**：上游 supermemory 地址，留空默认 `http://localhost:6767`
 - **API Key**：直接文本框粘贴保存（在 localhost:6767 首页可查看）
+- **托管本地服务器**：exe 路径 + OPENAI_* 三项 + 托管状态/启停按钮（详见下文「托管本地服务器进程」）
 - **测试连接**：一键探测配置是否生效、上游是否可达
 - 暂存式保存 / 放弃修改 + 「未保存」徽章；设置通过宿主 `ctx.settings` 持久化，改动即时生效、无需重启
 
@@ -21,15 +22,24 @@
 - `GET /config`、`POST /config`（`{ patch }` 合并，schemastery 校验）—— 设置读写
 
 ### AI 记忆工具（原生 dsh 工具，无需 MCP）
-插件 host 端直接把两个工具注册进 dsh 工具运行时（与 `run_code` / `web_search` 同一套机制），**只服务 dsh**：
+插件 host 端直接把三个工具注册进 dsh 工具运行时（与 `run_code` / `web_search` 同一套机制），**只服务 dsh**：
 
 - `supermemory_search` —— 语义检索记忆库（跨语言），把相关记忆带回对话
 - `supermemory_save` —— 把实体化事实写入记忆库，实时生成向量、立即可搜
+- `supermemory_forget` —— 删除记忆：精确 ids / 语义短语，`dryRun` 预览（语义删除会误伤相似旧记忆，务必先用 dryRun 预览）
 
-两个工具 host 端直连上游并注入配置的 API Key（与代理同一密钥源，无第二处凭据），模型不接触密钥。**不需要 MCP**：工具只在 dsh 内使用，MCP 桥只在需要跨客户端（Claude/Cursor 等）共享记忆时才值得引入。
-### 托管本地服务器进程（可选）
+三个工具 host 端直连上游并注入配置的 API Key（与代理同一密钥源，无第二处凭据），模型不接触密钥。**不需要 MCP**：工具只在 dsh 内使用，MCP 桥只在需要跨客户端（Claude/Cursor 等）共享记忆时才值得引入。
 
-插件默认 **dsh web 启动加载时自动拉起** supermemory 服务端进程、**dsh web 停止时销毁**它（进程树，`taskkill /T /F` 兜底），省去手动跑 `start-supermemory.bat`：
+### 确定性记忆钩子（免工具 · 每会话注入 + 每轮写库）
+host 端监听 dsh 会话事件，实现“零操作记忆”：
+
+- **session/created → 注入记忆上下文**：会话创建时拉取 /v4/profile（长期事实 static + 近期动态 dynamic），作为第一条 user 消息注入（agent.inject），每会话一次；子代理会话跳过
+- **turn/end → 逐轮写库**：每轮结束后把该轮文本（真实用户消息 + 助手回复 + 工具调用）POST 成 supermemory 文档（POST /v3/documents，customId=sessionId-turn-N、taskType=memory、dreaming=dynamic、documentDate=该轮时间），索引约 30–60 秒后成为可检索的动态记忆；子代理会话跳过
+- **策略**：每轮都写，不做“关键才写”过滤（关键无法定义）；上下文注入顺序 系统提示词 → 记忆 → 用户消息 → 权限 → 技能
+
+### 托管本地服务器进程（默认随 dsh 启停）
+
+插件**默认**在 **dsh web 启动加载时自动拉起** supermemory 服务端进程、**dsh web 停止时销毁**它（进程树，`taskkill /T /F` 兜底），省去手动跑 `start-supermemory.bat`：
 
 - **服务器可执行文件路径**：`supermemory-server-windows-x64.exe` 的绝对路径（默认 C:/Users/crack/Supermemory/supermemory-server-windows-x64.exe，Windows 写真实路径即可）
 - **OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL**：以环境变量注入子进程（默认 baseUrl https://token-plan-cn.xiaomimimo.com/v1、模型 mimo-v2.5），等价于 bat 里的 `set`
@@ -107,5 +117,6 @@ dsh-supermemory/
 
 ## 说明
 
-- 不修改 DSH 自带代码；supermemory 本体（`localhost:6767`）独立运行，本插件只做同源桥接与配置管理
+- 不修改 DSH 自带代码；supermemory 本体（`localhost:6767`）通常由本插件托管、随 dsh web 自动启停，也可外部运行（探测到外部实例时不重复拉起），本插件负责同源桥接、配置管理与记忆自动化
 - API Key 仅存于 dsh 服务端用户设置中，浏览器与仓库均不接触密钥
+- 逐轮写库会持续增长：每轮一个文档约 30–60 秒后成为可检索的动态记忆；当前为“每轮全写”（不做关键过滤），后续如需控制可在配置层再加过滤策略
