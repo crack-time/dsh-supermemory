@@ -304,24 +304,6 @@ class ManagedServer {
         }
     }
 
-    /** Manual "start / restart" from the card: restart our child, or spawn if none. */
-    async ensureStarted(scope: SettingsScope<any>, ctx: Context): Promise<ManagedSnapshot> {
-        const cfg = resolveConfig(scope);
-        if (!cfg.serverPath.trim()) {
-            this.info = { state: 'no-path' };
-            return this.snapshot();
-        }
-        if (this.child && this.child.exitCode === null) {
-            await this.stop(ctx);
-            this.lastSig = this.signature(cfg);
-            await this.start(scope, ctx, { skipProbe: true });
-        }
-        else {
-            await this.start(scope, ctx);
-        }
-        return this.snapshot();
-    }
-
     /** Kill only the process tree this plugin spawned. Never touches external instances. */
     async stop(ctx: Context): Promise<ManagedSnapshot> {
         const child = this.child;
@@ -459,12 +441,6 @@ async function handleApi(
             await scope.update(body.patch);
             await managed.sync(scope, ctx); // reconcile the managed process after save
             return sendJson(res, 200, resolveConfig(scope));
-        }
-        if (method === 'POST' && pathname === API_PREFIX + '/server/start') {
-            return sendJson(res, 200, { ok: true, managed: await managed.ensureStarted(scope, ctx) });
-        }
-        if (method === 'POST' && pathname === API_PREFIX + '/server/stop') {
-            return sendJson(res, 200, { ok: true, managed: await managed.stop(ctx) });
         }
         // Everything else: reverse proxy to the upstream Supermemory server.
         return await proxy(ctx, scope, req, res);

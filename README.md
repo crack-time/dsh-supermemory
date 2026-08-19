@@ -8,7 +8,7 @@
 - 在 GUI **设置 → 插件 → 插件配置** 页新增「Supermemory 代理」卡片，与内置 shell / agent-loop / web-search 卡片同款可折叠外观（设计令牌驱动，明暗主题自适应）
 - **服务地址**：上游 supermemory 地址，留空默认 `http://localhost:6767`
 - **API Key**：直接文本框粘贴保存（在 localhost:6767 首页可查看）
-- **托管本地服务器**：exe 路径 + OPENAI_* 三项 + 托管状态/启停按钮（详见下文「托管本地服务器进程」）
+- **托管本地服务器**：exe 路径 + OPENAI_* 三项 + 托管状态（详见下文「托管本地服务器进程」）
 - **测试连接**：一键探测配置是否生效、上游是否可达
 - 暂存式保存 / 放弃修改 + 「未保存」徽章；设置通过宿主 `ctx.settings` 持久化，改动即时生效、无需重启
 
@@ -44,7 +44,7 @@ host 端监听 dsh 会话事件，实现“零操作记忆”：
 - **服务器可执行文件路径**：`supermemory-server-windows-x64.exe` 的绝对路径（默认 C:/Users/crack/Supermemory/supermemory-server-windows-x64.exe，Windows 写真实路径即可）
 - **OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL**：以环境变量注入子进程（默认 baseUrl https://token-plan-cn.xiaomimimo.com/v1、模型 mimo-v2.5），等价于 bat 里的 `set`
 - 启动时先做**端口探测**：若 6767 已由外部实例在跑，则不重复拉起（状态显示「已在运行（外部实例）」，避免双写同一数据目录）；只杀**自己拉起的**进程，绝不碰外部实例
-- 保存配置 / 手动「启动/重启托管」会用最新配置重启；崩溃不会自动无限重启（状态可见，手动按钮兜底）
+- 保存配置会自动用最新配置重启；崩溃不会自动无限重启（状态可见，必要时重启 dsh web 重新拉起）
 - 清空路径则不会自动启动（卡片会提示「请先填写服务器可执行文件路径并保存」）
 
 

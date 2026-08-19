@@ -37,10 +37,6 @@ export declare const CARD_LOCALE: {
         mgtStopped: string;
         mgtMissingExe: string;
         mgtError: string;
-        serverStart: string;
-        serverStop: string;
-        serverBusy: string;
-        serverActionFailed: string;
     };
     en: {
         title: string;
@@ -79,10 +75,6 @@ export declare const CARD_LOCALE: {
         mgtStopped: string;
         mgtMissingExe: string;
         mgtError: string;
-        serverStart: string;
-        serverStop: string;
-        serverBusy: string;
-        serverActionFailed: string;
     };
 };
 interface CardProps {

@@ -54,10 +54,6 @@ export const CARD_LOCALE = {
         mgtStopped: '未启动',
         mgtMissingExe: '可执行文件缺失',
         mgtError: '启动失败',
-        serverStart: '启动/重启托管',
-        serverStop: '停止托管',
-        serverBusy: '处理中…',
-        serverActionFailed: '操作失败',
     },
     en: {
         title: 'Supermemory proxy',
@@ -96,10 +92,6 @@ export const CARD_LOCALE = {
         mgtStopped: 'Not running',
         mgtMissingExe: 'Executable missing',
         mgtError: 'Failed to start',
-        serverStart: 'Start / restart managed',
-        serverStop: 'Stop managed',
-        serverBusy: 'Working…',
-        serverActionFailed: 'Action failed',
     },
 };
 
@@ -383,8 +375,6 @@ export function SupermemorySettingsCard(props: CardProps) {
     const [openaiBaseUrl, setOpenaiBaseUrl] = useState('');
     const [openaiModel, setOpenaiModel] = useState('');
     const [managed, setManaged] = useState<ManagedStatus | null>(null);
-    const [serverBusy, setServerBusy] = useState(false);
-    const [serverActionErr, setServerActionErr] = useState(false);
     const [server, setServer] = useState<CardState | null>(null);
     const [saving, setSaving] = useState(false);
     const [saveFailed, setSaveFailed] = useState(false);
@@ -422,7 +412,6 @@ export function SupermemorySettingsCard(props: CardProps) {
                 openaiBaseUrl: cfg.openaiBaseUrl ?? '',
                 openaiModel: cfg.openaiModel ?? '',
             });
-            setServerActionErr(false);
             setStatus(null);
             // Best-effort fetch of the managed-process status.
             fetch(HEALTH_URL, { cache: 'no-store' })
@@ -512,7 +501,9 @@ export function SupermemorySettingsCard(props: CardProps) {
                 configured?: boolean;
                 baseUrl?: string;
                 error?: string;
+                managed?: ManagedStatus;
             };
+            if (data && data.managed) setManaged(data.managed);
             if (data && data.ok) {
                 setStatus({ kind: 'ok', text: txt('ok') + ' · ' + (data.baseUrl ?? '') });
             }
@@ -544,24 +535,6 @@ export function SupermemorySettingsCard(props: CardProps) {
             default: return m.state ?? '';
         }
     };
-
-    async function serverAction(which: 'start' | 'stop') {
-        setServerBusy(true);
-        setServerActionErr(false);
-        setStatus(null);
-        try {
-            const res = await fetch(CONFIG_URL.replace('/config', '/server/' + which), { method: 'POST' });
-            const data = (await res.json().catch(() => ({}))) as { ok?: boolean; managed?: ManagedStatus };
-            if (!res.ok || data.ok === false) setServerActionErr(true);
-            if (data.managed) setManaged(data.managed);
-        }
-        catch {
-            setServerActionErr(true);
-        }
-        finally {
-            setServerBusy(false);
-        }
-    }
 
     const title = txt('title');
     const statusText = status ? status.text : loadErr ? txt('loadFailed') : null;
@@ -661,24 +634,7 @@ export function SupermemorySettingsCard(props: CardProps) {
                         >
                             {txt('managedStatus')}: {mgtText(managed) ?? '—'}
                         </span>
-                        <button
-                            type="button"
-                            className="sm-settings-test"
-                            disabled={serverBusy}
-                            onClick={() => void serverAction('start')}
-                        >
-                            {serverBusy ? txt('serverBusy') : txt('serverStart')}
-                        </button>
-                        <button
-                            type="button"
-                            className="sm-settings-test"
-                            disabled={serverBusy}
-                            onClick={() => void serverAction('stop')}
-                        >
-                            {serverBusy ? txt('serverBusy') : txt('serverStop')}
-                        </button>
                     </div>
-                    {serverActionErr ? <p className="sm-settings-failed" role="status">{txt('serverActionFailed')}</p> : null}
                     <div className="sm-settings-footer">
                         {statusText ? (
                             <span
@@ -720,7 +676,6 @@ export function SupermemorySettingsCard(props: CardProps) {
                                 setOpenaiBaseUrl(server?.openaiBaseUrl ?? '');
                                 setOpenaiModel(server?.openaiModel ?? '');
                                 setSaveFailed(false);
-                                setServerActionErr(false);
                             }}
                         >
                             {txt('discard')}
