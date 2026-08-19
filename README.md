@@ -29,13 +29,13 @@
 两个工具 host 端直连上游并注入配置的 API Key（与代理同一密钥源，无第二处凭据），模型不接触密钥。**不需要 MCP**：工具只在 dsh 内使用，MCP 桥只在需要跨客户端（Claude/Cursor 等）共享记忆时才值得引入。
 ### 托管本地服务器进程（可选）
 
-管网卡里打开「随 dsh 自动启动/停止记忆服务」后，插件会在 **dsh web 启动加载时自动拉起** supermemory 服务端进程、**dsh web 停止时销毁**它（进程树，`taskkill /T /F` 兜底），省去手动跑 `start-supermemory.bat`：
+插件默认 **dsh web 启动加载时自动拉起** supermemory 服务端进程、**dsh web 停止时销毁**它（进程树，`taskkill /T /F` 兜底），省去手动跑 `start-supermemory.bat`：
 
 - **服务器可执行文件路径**：`supermemory-server-windows-x64.exe` 的绝对路径（默认 C:/Users/crack/Supermemory/supermemory-server-windows-x64.exe，Windows 写真实路径即可）
 - **OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL**：以环境变量注入子进程（默认 baseUrl https://token-plan-cn.xiaomimimo.com/v1、模型 mimo-v2.5），等价于 bat 里的 `set`
 - 启动时先做**端口探测**：若 6767 已由外部实例在跑，则不重复拉起（状态显示「已在运行（外部实例）」，避免双写同一数据目录）；只杀**自己拉起的**进程，绝不碰外部实例
 - 保存配置 / 手动「启动/重启托管」会用最新配置重启；崩溃不会自动无限重启（状态可见，手动按钮兜底）
-- 关闭开关或清空路径即回到纯手动 bat 方式，完全兼容旧用法
+- 清空路径则不会自动启动（卡片会提示「请先填写服务器可执行文件路径并保存」）
 
 
 ## 安装

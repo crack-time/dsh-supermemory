@@ -41,15 +41,12 @@ export const CARD_LOCALE = {
         checking: '检查中…',
         loadFailed: '读取配置失败',
         emptyKey: '未配置 API Key',
-        manageServer: '随 dsh 自动启动/停止记忆服务',
-        manageServerHint: '开启后 dsh web 启动时自动拉起服务器、停止时销毁进程；关闭则沿用手动 bat 启动',
         serverPath: '服务器可执行文件路径',
         serverPathHint: '例：C:\\Users\\crack\\Supermemory\\supermemory-server-windows-x64.exe',
         openaiApiKey: 'OPENAI_API_KEY（记忆引擎模型密钥）',
         openaiBaseUrl: 'OPENAI_BASE_URL',
         openaiModel: 'OPENAI_MODEL',
         managedStatus: '托管状态',
-        mgtUnmanaged: '未启用托管',
         mgtNoPath: '请先填写服务器可执行文件路径并保存',
         mgtExternal: '已在运行（外部实例，未重复拉起）',
         mgtRunning: '托管运行中',
@@ -86,15 +83,12 @@ export const CARD_LOCALE = {
         checking: 'Checking…',
         loadFailed: 'Failed to read configuration',
         emptyKey: 'API key not configured',
-        manageServer: 'Start/stop the server with dsh',
-        manageServerHint: 'Launch the server when dsh web starts and kill it on stop; disable to keep the manual .bat workflow',
         serverPath: 'Server executable path',
         serverPathHint: 'e.g. C:\\Users\\crack\\Supermemory\\supermemory-server-windows-x64.exe',
         openaiApiKey: 'OPENAI_API_KEY (memory-engine model key)',
         openaiBaseUrl: 'OPENAI_BASE_URL',
         openaiModel: 'OPENAI_MODEL',
         managedStatus: 'Managed state',
-        mgtUnmanaged: 'Not managed',
         mgtNoPath: 'Set the server executable path and save first',
         mgtExternal: 'Already running (external instance, not re-launched)',
         mgtRunning: 'Managed & running',
@@ -114,7 +108,6 @@ type CardTextKey = keyof typeof CARD_LOCALE.zh;
 interface CardState {
     baseUrl: string;
     apiKey: string;
-    manageServer: boolean;
     serverPath: string;
     openaiApiKey: string;
     openaiBaseUrl: string;
@@ -385,7 +378,6 @@ export function SupermemorySettingsCard(props: CardProps) {
     const [loading, setLoading] = useState(false);
     const [baseUrl, setBaseUrl] = useState('');
     const [apiKey, setApiKey] = useState('');
-    const [manageServer, setManageServer] = useState(false);
     const [serverPath, setServerPath] = useState('');
     const [openaiApiKey, setOpenaiApiKey] = useState('');
     const [openaiBaseUrl, setOpenaiBaseUrl] = useState('');
@@ -404,7 +396,6 @@ export function SupermemorySettingsCard(props: CardProps) {
     const dirty = server !== null &&
         (baseUrl.trim() !== server.baseUrl ||
             apiKey.trim() !== server.apiKey ||
-            manageServer !== server.manageServer ||
             serverPath.trim() !== server.serverPath ||
             openaiApiKey.trim() !== server.openaiApiKey ||
             openaiBaseUrl.trim() !== server.openaiBaseUrl ||
@@ -419,7 +410,6 @@ export function SupermemorySettingsCard(props: CardProps) {
             const cfg = (await res.json()) as CardState;
             setBaseUrl(cfg.baseUrl ?? '');
             setApiKey(cfg.apiKey ?? '');
-            setManageServer(cfg.manageServer === true);
             setServerPath(cfg.serverPath ?? '');
             setOpenaiApiKey(cfg.openaiApiKey ?? '');
             setOpenaiBaseUrl(cfg.openaiBaseUrl ?? '');
@@ -427,7 +417,6 @@ export function SupermemorySettingsCard(props: CardProps) {
             setServer({
                 baseUrl: cfg.baseUrl ?? '',
                 apiKey: cfg.apiKey ?? '',
-                manageServer: cfg.manageServer === true,
                 serverPath: cfg.serverPath ?? '',
                 openaiApiKey: cfg.openaiApiKey ?? '',
                 openaiBaseUrl: cfg.openaiBaseUrl ?? '',
@@ -459,7 +448,6 @@ export function SupermemorySettingsCard(props: CardProps) {
         const patch: Record<string, unknown> = {};
         if (baseUrl.trim() !== (server?.baseUrl ?? '')) patch.baseUrl = baseUrl.trim();
         if (apiKey.trim() !== (server?.apiKey ?? '')) patch.apiKey = apiKey.trim();
-        if (manageServer !== (server?.manageServer ?? false)) patch.manageServer = manageServer;
         if (serverPath.trim() !== (server?.serverPath ?? '')) patch.serverPath = serverPath.trim();
         if (openaiApiKey.trim() !== (server?.openaiApiKey ?? '')) patch.openaiApiKey = openaiApiKey.trim();
         if (openaiBaseUrl.trim() !== (server?.openaiBaseUrl ?? '')) patch.openaiBaseUrl = openaiBaseUrl.trim();
@@ -490,7 +478,6 @@ export function SupermemorySettingsCard(props: CardProps) {
                     ...(prev ?? {
                         baseUrl: '',
                         apiKey: '',
-                        manageServer: false,
                         serverPath: '',
                         openaiApiKey: '',
                         openaiBaseUrl: '',
@@ -547,7 +534,6 @@ export function SupermemorySettingsCard(props: CardProps) {
     const mgtText = (m: ManagedStatus | null): string | null => {
         if (!m) return null;
         switch (m.state) {
-            case 'unmanaged': return txt('mgtUnmanaged');
             case 'no-path': return txt('mgtNoPath');
             case 'external': return txt('mgtExternal');
             case 'running': return txt('mgtRunning') + (m.pid ? ' · PID ' + m.pid : '');
@@ -623,17 +609,6 @@ export function SupermemorySettingsCard(props: CardProps) {
                             onChange={(e) => setApiKey(e.target.value)}
                         />
                         <span className="sm-settings-hint">{txt('apiKeyHint')}</span>
-                    </label>
-                    <label className="sm-settings-row sm-settings-check">
-                        <input
-                            type="checkbox"
-                            checked={manageServer}
-                            onChange={(e) => setManageServer(e.target.checked)}
-                        />
-                        <span>
-                            <span className="sm-settings-label">{txt('manageServer')}</span>
-                            <span className="sm-settings-hint sm-settings-block">{txt('manageServerHint')}</span>
-                        </span>
                     </label>
                     <label className="sm-settings-row">
                         <span className="sm-settings-label">{txt('serverPath')}</span>
@@ -740,7 +715,6 @@ export function SupermemorySettingsCard(props: CardProps) {
                             onClick={() => {
                                 setBaseUrl(server?.baseUrl ?? '');
                                 setApiKey(server?.apiKey ?? '');
-                                setManageServer(server?.manageServer ?? false);
                                 setServerPath(server?.serverPath ?? '');
                                 setOpenaiApiKey(server?.openaiApiKey ?? '');
                                 setOpenaiBaseUrl(server?.openaiBaseUrl ?? '');

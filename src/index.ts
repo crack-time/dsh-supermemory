@@ -62,7 +62,6 @@ interface SupermemoryConfig {
     baseUrl: string;
     apiKey: string;
     /** Managed local server: start/stop supermemory-server alongside dsh web. */
-    manageServer: boolean;
     serverPath: string;
     openaiApiKey: string;
     openaiBaseUrl: string;
@@ -74,7 +73,6 @@ const SUPERMEMORY_SCHEMA = z.object({
     baseUrl: z.string().default(DEFAULT_BASE_URL),
     apiKey: z.string().default(''),
     // Managed local server: start/stop supermemory-server alongside dsh web.
-    manageServer: z.boolean().default(false),
     serverPath: z.string().default(''),
     openaiApiKey: z.string().default(''),
     openaiBaseUrl: z.string().default('https://token-plan-cn.xiaomimimo.com/v1'),
@@ -115,7 +113,6 @@ function resolveConfig(scope: SettingsScope<any>): SupermemoryConfig {
     return {
         baseUrl: (value?.baseUrl as string | undefined) ?? DEFAULT_BASE_URL,
         apiKey: (value?.apiKey as string | undefined) ?? '',
-        manageServer: (value?.manageServer as boolean | undefined) ?? false,
         serverPath: (value?.serverPath as string | undefined) ?? '',
         openaiApiKey: (value?.openaiApiKey as string | undefined) ?? '',
         openaiBaseUrl: (value?.openaiBaseUrl as string | undefined) ?? 'https://token-plan-cn.xiaomimimo.com/v1',
@@ -131,8 +128,7 @@ function resolveConfig(scope: SettingsScope<any>): SupermemoryConfig {
  * `external` and left alone — avoids double-writers on the same data dir).
  */
 type ManagedState =
-    | 'unmanaged'      // manageServer off
-    | 'no-path'       // manageServer on but serverPath empty (waiting for the card)
+    | 'no-path'       // serverPath empty (waiting for the card)
     | 'external'      // an instance already answers at baseUrl (not ours)
     | 'running'       // our spawned child is alive
     | 'starting'      // spawned, pid not yet bound (transient)
@@ -141,7 +137,6 @@ type ManagedState =
     | 'error';        // spawn threw
 
 interface ManagedSnapshot {
-    enabled: boolean;
     state: ManagedState;
     pid?: number;
     source?: 'spawned' | 'external';
@@ -152,7 +147,7 @@ interface ManagedSnapshot {
 
 class ManagedServer {
     private child: ChildProcess | undefined;
-    private info: ManagedSnapshot = { enabled: false, state: 'unmanaged' };
+    private info: ManagedSnapshot = { state: 'no-path' };
     private lastSig = '';
 
     snapshot(): ManagedSnapshot {
@@ -183,20 +178,15 @@ class ManagedServer {
     }
 
     /**
-     * Reconcile with current config: shutdown when unmanaged, (re)start when
-     * config/path/model changed, keep running otherwise. Called on activation
-     * and after every config save.
+     * Reconcile with current config: shutdown when the path is cleared,
+     * (re)start when config/path/model changed, keep running otherwise. Called
+     * on activation and after every config save.
      */
     async sync(scope: SettingsScope<any>, ctx: Context): Promise<void> {
         const cfg = resolveConfig(scope);
-        if (!cfg.manageServer) {
-            if (this.child && this.child.exitCode === null) await this.stop(ctx);
-            this.info = { enabled: false, state: 'unmanaged' };
-            return;
-        }
         if (!cfg.serverPath.trim()) {
             if (this.child && this.child.exitCode === null) await this.stop(ctx);
-            this.info = { enabled: true, state: 'no-path' };
+            this.info = { state: 'no-path' };
             return;
         }
         const sig = this.signature(cfg);
@@ -224,16 +214,12 @@ class ManagedServer {
         opts: { skipProbe?: boolean } = {},
     ): Promise<void> {
         const cfg = resolveConfig(scope);
-        if (!cfg.manageServer) {
-            this.info = { enabled: false, state: 'unmanaged' };
-            return;
-        }
         if (!cfg.serverPath.trim()) {
-            this.info = { enabled: true, state: 'no-path' };
+            this.info = { state: 'no-path' };
             return;
         }
         if (this.child && this.child.exitCode === null) {
-            this.info = { enabled: true, state: 'running', pid: this.child.pid, source: 'spawned' };
+            this.info = { state: 'running', pid: this.child.pid, source: 'spawned' };
             return;
         }
         const exePath = cfg.serverPath.trim();
@@ -241,12 +227,12 @@ class ManagedServer {
             if (!statSync(exePath).isFile()) throw new Error('not a file');
         }
         catch {
-            this.info = { enabled: true, state: 'missing-exe', exe: exePath };
+            this.info = { state: 'missing-exe', exe: exePath };
             ctx.logger.warn('[supermemory] managed server exe not found: ' + exePath);
             return;
         }
         if (!opts.skipProbe && (await this.probe(cfg))) {
-            this.info = { enabled: true, state: 'external', exe: exePath, source: 'external' };
+            this.info = { state: 'external', exe: exePath, source: 'external' };
             return;
         }
         try {
@@ -288,7 +274,6 @@ class ManagedServer {
                     '[supermemory] managed server exited code=' + code + ' signal=' + String(signal),
                 );
                 this.info = {
-                    enabled: true,
                     state: 'stopped',
                     ...(this.info.pid ? { pid: this.info.pid } : {}),
                     exe: exePath,
@@ -298,11 +283,10 @@ class ManagedServer {
             child.on('error', (error) => {
                 if (this.child !== child) return;
                 this.child = undefined;
-                this.info = { enabled: true, state: 'error', exe: exePath, error: error.message };
+                this.info = { state: 'error', exe: exePath, error: error.message };
                 ctx.logger.warn('[supermemory] managed server spawn error: ' + error.message);
             });
             this.info = {
-                enabled: true,
                 state: child.pid ? 'running' : 'starting',
                 pid: child.pid ?? undefined,
                 source: 'spawned',
@@ -312,7 +296,6 @@ class ManagedServer {
         }
         catch (error) {
             this.info = {
-                enabled: true,
                 state: 'error',
                 exe: exePath,
                 error: error instanceof Error ? error.message : String(error),
@@ -324,12 +307,8 @@ class ManagedServer {
     /** Manual "start / restart" from the card: restart our child, or spawn if none. */
     async ensureStarted(scope: SettingsScope<any>, ctx: Context): Promise<ManagedSnapshot> {
         const cfg = resolveConfig(scope);
-        if (!cfg.manageServer) {
-            this.info = { enabled: false, state: 'unmanaged' };
-            return this.snapshot();
-        }
         if (!cfg.serverPath.trim()) {
-            this.info = { enabled: true, state: 'no-path' };
+            this.info = { state: 'no-path' };
             return this.snapshot();
         }
         if (this.child && this.child.exitCode === null) {
@@ -358,7 +337,6 @@ class ManagedServer {
             killer.on('error', () => { /* taskkill may be unavailable — child.kill already ran */ });
             ctx.logger.info('[supermemory] managed server stopping pid=' + pid);
             this.info = {
-                enabled: this.info.enabled,
                 state: 'stopped',
                 pid,
                 exe: this.info.exe,
