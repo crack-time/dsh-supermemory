@@ -750,6 +750,144 @@ function makeForgetTool(scope: SettingsScope<any>): ToolDefinition {
 }
 
 /**
+ * Delete-document tool: remove supermemory documents (raw conversation-turn
+ * records) by exact id(s). Deleting a document CASCADE-deletes the memories it
+ * produced — the user accepts this by default. Guarded: dryRun previews and
+ * confirm:true is required to actually delete.
+ */
+function makeDeleteDocumentTool(scope: SettingsScope<any>): ToolDefinition {
+    return {
+        name: 'supermemory_delete_document',
+        description:
+            'Delete supermemory documents (raw conversation-turn records) by EXPLICIT id(s) only. WARNING: deleting a document CASCADE-deletes the memories it produced. Whitelist-only: you must pass exact document ids; bulk-container deletion is intentionally disabled to prevent accidental loss. Always dryRun first (returns titles for review), then pass confirm:true with id(s) to actually delete.',
+        parameters: {
+            type: 'object',
+            properties: {
+                ids: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Exact document ids to delete (required, max 100 per call). Bulk-container deletion is disabled — you must list every id explicitly.',
+                },
+                dryRun: {
+                    type: 'boolean',
+                    description: 'When true, only preview which documents WOULD be deleted (returns titles for human review, no cascade).',
+                    default: true,
+                },
+                confirm: {
+                    type: 'boolean',
+                    description: 'Required to actually delete. Must be true to perform the deletion (guards against accidental cascade memory loss).',
+                    default: false,
+                },
+            },
+            required: ['ids'],
+        },
+        output: {
+            schema: {
+                type: 'object',
+                properties: {
+                    dryRun: { type: 'boolean' },
+                    deleted: { type: 'number' },
+                    summary: { type: 'string' },
+                    documents: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                id: { type: 'string' },
+                                title: { type: 'string' },
+                            },
+                            required: ['id'],
+                            additionalProperties: false,
+                        },
+                    },
+                },
+                required: ['dryRun', 'deleted', 'summary'],
+                additionalProperties: false,
+            },
+            render: (_args, value) => {
+                const v = value as { dryRun?: boolean; deleted?: number; summary?: string };
+                const prefix = v.dryRun ? ' (dry run, nothing deleted)' : '';
+                return [{ type: 'text', text: 'supermemory_delete_document' + prefix + ': ' + (v.summary ?? '') + ' (' + (v.deleted ?? 0) + ' documents)' }];
+            },
+        },
+        execute: async (args, exec) => {
+            const a = (args ?? {}) as { ids?: unknown; dryRun?: unknown; confirm?: unknown };
+            const ids = Array.isArray(a.ids)
+                ? a.ids.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map((x) => x.trim())
+                : [];
+            // HARD GUARD: whitelist-only. Bulk-container deletion is disabled.
+            if (ids.length === 0) throw new Error('supermemory_delete_document: ids (non-empty array) is required — bulk-container deletion is disabled to prevent accidental loss. List exact document ids.');
+            if (ids.length > 100) throw new Error('supermemory_delete_document: at most 100 ids per call');
+            const dryRun = a.dryRun === true;
+            const confirm = a.confirm === true;
+            const { base, apiKey } = requireUpstream(scope);
+
+            // Build targets (id + resolved title from the list endpoint for review).
+            const targets: Array<{ id: string; title: string }> = [];
+            const listRes = await fetch(base + '/v3/documents/list', {
+                method: 'POST',
+                headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
+                body: JSON.stringify({ containerTag: DEFAULT_CONTAINER, limit: 1000 }),
+                signal: exec.signal,
+            });
+            if (listRes.ok) {
+                const listData = (await listRes.json()) as { memories?: Array<{ id: string; title?: string }> };
+                const known = new Map<string, string>((listData.memories ?? []).map((d) => [d.id, d.title ?? '']));
+                for (const id of ids) targets.push({ id, title: known.get(id) ?? '' });
+            } else {
+                for (const id of ids) targets.push({ id, title: '' });
+            }
+
+            if (dryRun) {
+                return {
+                    dryRun: true,
+                    deleted: 0,
+                    summary: 'Dry run: ' + targets.length + ' document(s) would be deleted (cascade-deleting their memories). Titles shown for review; pass confirm:true to actually delete.',
+                    documents: targets,
+                };
+            }
+
+            if (!confirm) {
+                throw new Error('supermemory_delete_document: confirm:true is required to actually delete — this CASCADE-deletes the documents produced memories. Re-check with dryRun first.');
+            }
+
+            let deleted = 0;
+            for (let i = 0; i < ids.length; i += 100) {
+                const batch = ids.slice(i, i + 100);
+                const delRes = await fetch(base + '/v3/documents/bulk', {
+                    method: 'DELETE',
+                    headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
+                    body: JSON.stringify({ ids: batch }),
+                    signal: exec.signal,
+                });
+                if (delRes.ok) {
+                    const d = (await delRes.json()) as { deleted?: number; deletedDocs?: number };
+                    deleted += d.deleted ?? d.deletedDocs ?? batch.length;
+                } else {
+                    for (const id of batch) {
+                        const singleRes = await fetch(base + '/v3/documents/' + id, {
+                            method: 'DELETE',
+                            headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
+                            signal: exec.signal,
+                        });
+                        if (singleRes.ok) deleted++;
+                    }
+                }
+            }
+
+            return {
+                dryRun: false,
+                deleted,
+                summary: 'Deleted ' + deleted + ' document(s) (and their produced memories).',
+                documents: targets.map((t) => ({ id: t.id, title: t.title })),
+            };
+        },
+        timeoutMs: 60000,
+    };
+}
+
+
+/**
  * Extract the plain-text segments from a message's content blocks.
  */
 function messageText(content: readonly unknown[]): string {
@@ -802,6 +940,59 @@ function turnTranscript(session: Session, turn: number, maxChars = 6000): string
     return text.length > maxChars ? text.slice(0, maxChars) : text;
 }
 
+/**
+ * Strict low-value turn detector: a turn whose real user message(s) carry no
+ * substantive content — a single choice character ("A"/"1"), a bare
+ * acknowledgment ("确认"/"OK"/"是"/"好"), or a bare command ("do it"/"开始"/
+ * "继续") — should NOT be persisted as a supermemory document. The assistant
+ * reply is ignored (strict mode): such a turn adds no new information, it only
+ * confirms or triggers something already stated in context.
+ */
+
+const LOW_VALUE_TOKEN_RE = new RegExp(
+    '^(confirm|confirmed|ok|okay|k|yes|yeah|yep|yup|sure|done|good|fine|great|nice|'
+    + 'cool|awesome|right|got[ ]it|roger|understood|copy|affirmative|accepted|'
+    + 'go|go[ ]ahead|go[ ]on|go[ ]for[ ]it|start|begin|proceed|continue|keep[ ]going|next|'
+    + 'execute|run|run[ ]it|run[ ]this|do[ ]it|do[ ]that|do[ ]it[ ]now|make[ ]it[ ]happen|'
+    + "on[ ]it|i['’]m[ ]on[ ]it|doing[ ]it|will[ ]do|sounds[ ]good|looks[ ]good|makes[ ]sense|"
+    + "that['’]s[ ]fine|yes[ ]please|please|thanks|thank[ ]you|thx|ty|"
+    + '确认|可以|好的|好|是|对|行|嗯|恩|哦|啊|哦哦|嗯嗯|对对|是是|收到|明白|知道了|'
+    + '同意|认可|我认可|开始|开始吧|执行|你执行|你逐个执行|逐个执行|继续|你继续|继续吧|'
+    + '去吧|来吧|干吧|跑|跑一次|你现在就跑一次|重启了|我重启了|重启|算了|算了算了|没关系|'
+    + '可以吧|行吧|好的吧|没问题|请继续|就这么办|好的好的|收到收到|谢谢|多谢)$',
+    'i',
+);
+
+/** Extract the plain real-user message texts from a composed transcript. */
+function extractUserMessages(transcript: string): string[] {
+    const re = /(?:^|\n\n)User:\n([\s\S]*?)(?=\n\nAssistant:|\n\n\[tool\]|\n\nUser:|$)/g;
+    const out: string[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(transcript)) !== null) {
+        const text = (m[1] ?? '').trim();
+        if (text) out.push(text);
+    }
+    return out;
+}
+
+/** True when a user message carries no substance (pure choice/ack/command). */
+function isLowValueUserMessage(userText: string): boolean {
+    const s = userText.replace(/\s+/g, ' ').trim();
+    if (!s) return true;
+    // Keep only letters + digits (Unicode-aware); drop punctuation/symbols/emoji.
+    const alnum = s.replace(/[^\p{L}\p{N}]/gu, '');
+    if (alnum.length === 0) return true; // purely punctuation/symbols/emoji
+    if (alnum.length === 1) return true; // single choice char: A / 1 / 好
+    return LOW_VALUE_TOKEN_RE.test(s.toLowerCase());
+}
+
+/** Strict: skip persisting when EVERY real user message in the turn is low-value. */
+function isTurnLowValue(transcript: string): boolean {
+    const users = extractUserMessages(transcript);
+    if (users.length === 0) return true; // no real user content -> nothing to persist
+    return users.every((u) => isLowValueUserMessage(u));
+}
+
 /** Fetch the stored profile (static + dynamic facts) for the default container. */
 async function fetchProfile(scope: SettingsScope<any>): Promise<string> {
     const { base, apiKey } = requireUpstream(scope);
@@ -826,8 +1017,9 @@ function injectContext(ctx: Context, session: Session, text: string): void {
     const agent = ctx.agents.get(session.id);
     if (!agent) return;
     try {
+        const clarificationInstruction = '\n\n[SYSTEM INSTRUCTION] Please ask me 1-2 key questions to clarify the requirement before proceeding.';
         agent.inject(createUserMessage({
-            content: [{ type: 'text', text: '\u3010记忆上下文（来自本地 supermemory）\u3011\n' + text }],
+            content: [{ type: 'text', text: '[Memory Context (from local supermemory)]\n' + text + clarificationInstruction }],
             source: { kind: 'plugin', plugin: '@crack/dsh-supermemory', form: 'recall' },
         }));
     }
@@ -939,6 +1131,7 @@ function apply(ctx: Context): void {
             ctx.tools.register(makeSearchTool(scope)),
             ctx.tools.register(makeSaveTool(scope)),
             ctx.tools.register(makeForgetTool(scope)),
+            ctx.tools.register(makeDeleteDocumentTool(scope)),
             // Deterministic read: inject the stored profile at session start.
             ctx.on('session/created', (session) => {
                 if (isSubagent(session)) return;
@@ -957,6 +1150,9 @@ function apply(ctx: Context): void {
                 const turn = (event.data as { turn: number }).turn;
                 const transcript = turnTranscript(session, turn);
                 if (!transcript) return;
+                // Strict low-value gate: skip persisting bare acknowledgments /
+                // single-character choices / commands ("确认", "A", "do it", ...).
+                if (isTurnLowValue(transcript)) return;
                 void persistTurn(ctx, scope, session, turn, transcript);
             }),
         ];
