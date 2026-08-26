@@ -58,6 +58,7 @@ export class ManagedServer {
             return res.ok;
         }
         catch {
+            // Unreachable/timeout: treat as 'no instance running' so the managed server starts.
             return false;
         }
     }

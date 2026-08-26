@@ -38,9 +38,21 @@ function messageText(content: readonly unknown[]): string {
  */
 function turnTranscript(session: Session, turn: number, maxChars = 6000): string {
     const events = session.events;
-    const start = events.findIndex(
-        (e) => e.type === 'turn/start' && (e.data as { turn: number }).turn === turn,
-    );
+    // Callers fire on turn/end: the matching turn/start is the LAST one in the
+    // log (turns are sequential and this turn just ended), so scan from the
+    // tail — O(this turn's events) instead of O(all events) for long sessions.
+    // No per-session index state needed.
+    let start = -1;
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+        const e = events[i];
+        if (!e) continue; // noUncheckedIndexedAccess: sparse guard
+        if (e.type === 'turn/start' && (e.data as { turn: number }).turn === turn) {
+            start = i;
+            break;
+        }
+        // Safety: never scan past the previous turn's boundary.
+        if (e.type === 'turn/end' && (e.data as { turn: number }).turn === turn - 1) break;
+    }
     if (start < 0) return '';
     const parts: string[] = [];
     for (let index = start; index < events.length; index += 1) {
@@ -171,18 +183,36 @@ const sessionContainerRef = new Map<string, string>();
 // filtered out before reaching this point).
 // ---------------------------------------------------------------------------
 
-/** Resolve the workspace id owning a session. */
+/**
+ * Per-session workspace cache: a session's cwd (and thus its workspace) never
+ * changes, so resolve once and reuse. Shared by persistTurn (every turn) and
+ * any future consumer; cleaned up on session/disposed.
+ */
+const sessionWorkspaceRef = new Map<string, string | undefined>();
+const workspaceResolving = new Set<string>();
+
+/** Resolve the workspace id owning a session (cached per session). */
 async function workspaceOf(ctx: Context, session: Session): Promise<string | undefined> {
+    // Cache-first: avoid re-resolving the same cwd on every turn.
+    if (sessionWorkspaceRef.has(session.id)) return sessionWorkspaceRef.get(session.id);
+    // In-flight dedup: concurrent callers share one resolution.
+    if (workspaceResolving.has(session.id)) return undefined;
+    workspaceResolving.add(session.id);
     try {
         const cwd = session.header?.cwd;
         const workspace = cwd ? await ctx.workspaceRegistry.resolveByPath(cwd) : undefined;
         const found = workspace ?? ctx.workspaceRegistry.list().find((w) => w.sessionIds.includes(session.id));
-        if (!found) return undefined;
-        return String(found.id);
+        const id = found ? String(found.id) : undefined;
+        sessionWorkspaceRef.set(session.id, id);
+        return id;
     }
     catch (error) {
         ctx.logger.warn('supermemory workspace resolve:', error);
+        sessionWorkspaceRef.set(session.id, undefined);
         return undefined;
+    }
+    finally {
+        workspaceResolving.delete(session.id);
     }
 }
 
@@ -250,6 +280,8 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
     disposers.push(ctx.on('session/disposed', (session) => {
         injectedSessions.delete(session.id);
         sessionContainerRef.delete(session.id);
+        sessionWorkspaceRef.delete(session.id);
+        workspaceResolving.delete(session.id);
     }));
 
     disposers.push(ctx.on('session/created', (session) => {

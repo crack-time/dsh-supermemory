@@ -11,6 +11,7 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
 import { SupermemorySettingsCard } from './card.tsx';
 import { CARD_LOCALE } from './card-locale.ts';
 import { injectCardCss } from './card-css.ts';
+import { API_URLS } from './api.ts';
 
 /**
  * Local declaration merging for the seats this card occupies.
@@ -72,7 +73,7 @@ export function apply(ctx: ClientContext) {
                 hooks: {},
                 applyPatch: async (patch: Record<string, unknown>) => {
                     try {
-                        const res = await fetch('/plugins/@crack/dsh-supermemory/api/config', {
+                        const res = await fetch(API_URLS.config, {
                             method: 'POST',
                             headers: { 'content-type': 'application/json' },
                             body: JSON.stringify({ patch }),
@@ -84,6 +85,7 @@ export function apply(ctx: ClientContext) {
                         return { ok: true };
                     }
                     catch {
+                        // Network failure: report to the card instead of throwing.
                         return { ok: false, error: 'network' };
                     }
                 },
