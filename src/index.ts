@@ -1162,7 +1162,7 @@ function makeSelectMemoryTool(scope: SettingsScope<any>, ctx: Context): ToolDefi
             properties: {
                 containerTag: {
                     type: 'string',
-                    description: 'The container tag the user selected or created.',
+                    description: 'The container tag the user selected or created. Must be ASCII-only (alphanumeric, hyphens, underscores, colons). No spaces or CJK characters.',
                 },
             },
             required: ['containerTag'],
@@ -1289,6 +1289,7 @@ function apply(ctx: Context): void {
                             'Before answering the user, you MUST ask them to select a memory space using ask_user_question.\n' +
                             'Available memory spaces:\n' + containerLines + '\n' +
                             'Show these as options. The user may also type a new name directly in the answer box to create a new space.\n' +
+                            'IMPORTANT: containerTag must contain ONLY alphanumeric characters, hyphens, underscores, and colons. No spaces, no CJK characters, no special characters. When the user types a new name, convert it to a valid ASCII tag (e.g. "论文" → "thesis", "插件开发" → "plugin-dev").\n' +
                             'After the user selects (or types a new name), call supermemory_select_memory with the containerTag.\n' +
                             'That tool will inject the memory profile automatically. Do NOT answer the user\'s question until this is done.\n' +
                             'Keep the selection prompt brief — the user\'s original question will be handled after memory is loaded.';
