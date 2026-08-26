@@ -1032,13 +1032,13 @@ function isTurnLowValue(transcript: string): boolean {
     return users.every((u) => isLowValueUserMessage(u));
 }
 
-/** Fetch the stored profile (static + dynamic facts) for the default container. */
-async function fetchProfile(scope: SettingsScope<any>): Promise<string> {
+/** Fetch the stored profile (static + dynamic facts) for the given container. */
+async function fetchProfile(scope: SettingsScope<any>, containerTag?: string): Promise<string> {
     const { base, apiKey } = requireUpstream(scope);
     const res = await fetch(base + '/v4/profile', {
         method: 'POST',
         headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
-        body: JSON.stringify({ containerTag: DEFAULT_CONTAINER }),
+        body: JSON.stringify({ containerTag: containerTag || activeContainer(scope) }),
         signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) return '';
@@ -1181,8 +1181,10 @@ function makeSelectMemoryTool(scope: SettingsScope<any>, ctx: Context): ToolDefi
                 additionalProperties: false,
             },
             render: (_args, value) => {
-                const v = value as { summary?: string };
-                return [{ type: 'text', text: v.summary ?? 'Memory space selected.' }];
+                const v = value as { summary?: string; staticCount?: number; dynamicCount?: number };
+                const sc = v.staticCount ?? 0;
+                const dc = v.dynamicCount ?? 0;
+                return [{ type: 'text', text: 'Memory loaded (' + sc + ' long-term + ' + dc + ' recent)' }];
             },
         },
         execute: async (args) => {
@@ -1193,11 +1195,15 @@ function makeSelectMemoryTool(scope: SettingsScope<any>, ctx: Context): ToolDefi
             // Save the selection to settings.
             await scope.update({ activeContainer: tag });
 
-            // Fetch the profile for the selected container.
-            const { base, apiKey } = requireUpstream(scope);
+            // Fetch the profile for the selected container and include it in the result.
+            let profileText = '';
             let staticCount = 0;
             let dynamicCount = 0;
             try {
+                const profile = await fetchProfile(scope, tag);
+                profileText = profile;
+                // Re-fetch to get counts (fetchProfile returns formatted text)
+                const { base, apiKey } = requireUpstream(scope);
                 const res = await fetch(base + '/v4/profile', {
                     method: 'POST',
                     headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
@@ -1206,33 +1212,16 @@ function makeSelectMemoryTool(scope: SettingsScope<any>, ctx: Context): ToolDefi
                 });
                 if (res.ok) {
                     const data = (await res.json()) as { profile?: { static?: string[]; dynamic?: string[] } };
-                    const lines: string[] = [];
-                    const stat = data.profile?.static ?? [];
-                    const dyn = data.profile?.dynamic ?? [];
-                    staticCount = stat.length;
-                    dynamicCount = dyn.length;
-                    if (stat.length > 0) lines.push('Long-term facts (static):\n- ' + stat.join('\n- '));
-                    if (dyn.length > 0) lines.push('Recent context (dynamic):\n- ' + dyn.join('\n- '));
-                    const profileText = lines.join('\n\n');
-                    if (profileText) {
-                        // Inject into the current session's agent.
-                        const rootId = ctx.agents.roots()[0]?.id;
-                        if (rootId) {
-                            const agent = ctx.agents.get(rootId);
-                            if (agent) {
-                                agent.inject(createUserMessage({
-                                    content: [{ type: 'text', text: '[Memory Context (container: ' + tag + ')]\n' + profileText }],
-                                    source: { kind: 'plugin', plugin: '@crack/dsh-supermemory', form: 'recall' },
-                                }));
-                            }
-                        }
-                    }
+                    staticCount = (data.profile?.static ?? []).length;
+                    dynamicCount = (data.profile?.dynamic ?? []).length;
                 }
             } catch {
-                // Profile fetch failed — not fatal, just no context injected.
+                // Profile fetch failed — not fatal.
             }
 
-            const summary = 'Memory space "' + tag + '" selected. Injected ' + staticCount + ' long-term facts + ' + dynamicCount + ' recent context entries. You can now answer the user\'s questions.';
+            const summary = profileText
+                ? 'Memory space "' + tag + '" selected and loaded. Below is the memory context for this session:\n\n' + profileText
+                : 'Memory space "' + tag + '" selected. No existing memories found in this space yet. You can now answer the user\'s questions.';
             return { containerTag: tag, profileInjected: true, staticCount, dynamicCount, summary };
         },
         timeoutMs: 15000,
