@@ -11,7 +11,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import type { Session } from '@deepseek-ai/dsh-session';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
 import { activeContainer, requireUpstream } from './config.ts';
-import { discoverContainers, fetchProfile, type ContainerEntry } from './containers.ts';
+import { fetchProfile } from './containers.ts';
 
 // ---------------------------------------------------------------------------
 // Message-text extraction + transcript composition
@@ -237,47 +237,30 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
         if (isSubagent(session)) return;
         if (injectedSessions.has(session.id)) return;
         injectedSessions.add(session.id);
-        const log = (msg: string) => ctx.logger.info('[supermemory] session/created: ' + msg);
         void (async () => {
             try {
-                const { base, apiKey } = requireUpstream(scope);
-                log('base=' + base + ' apiKey=' + (apiKey ? apiKey.slice(0, 10) + '...' : '(empty)'));
-                let entries: ContainerEntry[] = [];
-                for (let attempt = 0; attempt < 4; attempt += 1) {
-                    try {
-                        entries = await discoverContainers(base, apiKey);
-                        if (entries.length > 0) break;
-                    }
-                    catch (err) {
-                        log('discover attempt ' + (attempt + 1) + ' failed: ' + (err instanceof Error ? err.message : String(err)));
-                    }
-                    await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
-                }
-                log('entries: ' + JSON.stringify(entries.map((c) => c.tag + ':' + c.staticCount + 's+' + c.dynamicCount + 'd+' + c.docCount + 'docs')));
-
-                const containerLines = entries
-                    .map((c) => '- ' + c.tag + ': ' + c.staticCount + ' static + ' + c.dynamicCount + ' dynamic (' + c.docCount + ' docs)')
-                    .join('\n') || '- ' + activeContainer(scope) + ' (default, 0 memories)';
-
                 const active = activeContainer(scope);
                 // Snapshot the container for THIS session: turn/end persistence
                 // uses it so writes always stay in the injected space, even if
                 // the user switches the global setting mid-session.
                 sessionContainerRef.set(session.id, active);
+                // Fetch the ACTIVE container's profile only — the container was
+                // chosen by the user in the settings card, so no container list
+                // is needed (and no full document scan).
                 let profileText = '';
-                if (active) {
+                for (let attempt = 0; attempt < 3; attempt += 1) {
                     try {
                         profileText = await fetchProfile(scope, active);
+                        if (profileText) break;
                     }
-                    catch { /* optional */ }
+                    catch { /* upstream may still be booting */ }
+                    await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
                 }
                 const guidance =
                     '[Memory Context (from local supermemory)]\n' +
                     (profileText ? profileText + '\n\n' : '') +
                     'Active memory space: ' + active + '\n' +
-                    'Available memory spaces (change it in dsh Settings → Supermemory → "当前记忆空间"):\n' +
-                    containerLines + '\n' +
-                    '[SYSTEM INSTRUCTION] If the user asks about memory, use the active memory space above.';
+                    '[SYSTEM INSTRUCTION] Memory queries default to the active memory space above.';
                 injectContext(ctx, session, guidance);
             } catch (error) {
                 ctx.logger.warn('supermemory session init:', error);
