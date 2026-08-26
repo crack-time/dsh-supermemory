@@ -11,6 +11,7 @@ import {
     upstreamBase,
     requireUpstream,
     setActiveContainer,
+    activeContainer,
 } from './config.ts';
 import { discoverContainers } from './containers.ts';
 import type { ManagedServer } from './managed-server.ts';
@@ -171,7 +172,7 @@ export async function handleApi(
             try {
                 const entries = await discoverContainers(base, apiKey);
                 const containers = entries.map((c) => ({ tag: c.tag, staticCount: c.staticCount, dynamicCount: c.dynamicCount, docCount: c.docCount }));
-                const active = resolveConfig(scope).activeContainer?.trim() || entries.find((c) => c.docCount > 0)?.tag || '';
+                const active = activeContainer(scope);
                 return sendJson(res, 200, { containers, active });
             }
             catch (e) {

@@ -11,7 +11,7 @@ import { settingsNamespace } from '@deepseek-ai/dsh-settings';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
 
 export const DEFAULT_BASE_URL = 'http://localhost:6767';
-export const DEFAULT_CONTAINER = 'code-dev';
+export const DEFAULT_CONTAINER = 'sm_project_default';
 export const DEFAULT_OPENAI_BASE_URL = 'https://token-plan-cn.xiaomimimo.com/v1';
 export const DEFAULT_OPENAI_MODEL = 'mimo-v2.5';
 

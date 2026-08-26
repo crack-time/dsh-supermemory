@@ -9,7 +9,7 @@
 import z from '@deepseek-ai/schemastery';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
 export declare const DEFAULT_BASE_URL = "http://localhost:6767";
-export declare const DEFAULT_CONTAINER = "code-dev";
+export declare const DEFAULT_CONTAINER = "sm_project_default";
 export declare const DEFAULT_OPENAI_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1";
 export declare const DEFAULT_OPENAI_MODEL = "mimo-v2.5";
 /** Resolved settings shape for the "supermemory" namespace. */

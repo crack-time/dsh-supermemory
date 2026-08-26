@@ -36,7 +36,7 @@ export async function discoverContainers(
 ): Promise<ContainerEntry[]> {
     const timeoutMs = opts.timeoutMs ?? 8000;
     const maxTags = opts.maxTags ?? 50;
-    const defaults = opts.defaults ?? [DEFAULT_CONTAINER, 'sm_project_default'];
+    const defaults = opts.defaults ?? [DEFAULT_CONTAINER];
     // 1. List every document (no container filter) and read its containerTags.
     const listRes = await fetch(base + '/v3/documents/list', {
         method: 'POST',

@@ -8,7 +8,7 @@
 - 在 GUI **设置 → 插件 → 插件配置** 页新增「Supermemory 代理」卡片，与内置 shell / agent-loop / web-search 卡片同款可折叠外观（设计令牌驱动，明暗主题自适应）
 - **服务地址**：上游 supermemory 地址，留空默认 `http://localhost:6767`
 - **API Key**：直接文本框粘贴保存（在 localhost:6767 首页可查看）
-- **当前记忆空间**：下拉选择器 —— 列出所有容器（含 static/dynamic 记忆计数），可**新建空间**；选择即保存为 `activeContainer`，新会话自动注入该空间的记忆上下文。下拉展开时按 60 秒缓存时效自动刷新
+- **当前记忆空间**：下拉选择器 —— 列出所有容器（含 static/dynamic 记忆计数），可**新建空间**；选择即保存为 `activeContainer`，新会话自动注入该空间的记忆上下文。下拉展开时按 60 秒缓存时效自动刷新。未选择时默认使用服务器自带的 `sm_project_default`（Dashboard 的 “Default Project”）
 - **托管本地服务器**：exe 路径 + OPENAI_* 三项 + 托管状态（详见下文「托管本地服务器进程」）
 - **测试连接**：一键探测配置是否生效、上游是否可达
 - 暂存式保存 / 放弃修改 + 「未保存」徽章；设置通过宿主 `ctx.settings` 持久化，改动即时生效、无需重启
