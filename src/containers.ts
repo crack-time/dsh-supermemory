@@ -108,8 +108,8 @@ export async function fetchProfile(scope: SettingsScope<any>, containerTag?: str
     const lines: string[] = [];
     const stat = data.profile?.static ?? [];
     const dyn = data.profile?.dynamic ?? [];
-    if (stat.length > 0) lines.push('长期事实 (static):\n- ' + stat.join('\n- '));
-    if (dyn.length > 0) lines.push('近期动态 (dynamic):\n- ' + dyn.join('\n- '));
+    if (stat.length > 0) lines.push('Long-term facts (static):\n- ' + stat.join('\n- '));
+    if (dyn.length > 0) lines.push('Recent dynamics (dynamic):\n- ' + dyn.join('\n- '));
     return lines.join('\n\n');
 }
 
