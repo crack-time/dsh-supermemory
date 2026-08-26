@@ -256,10 +256,13 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
                     catch { /* upstream may still be booting */ }
                     await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
                 }
+                // injectContext already prepends the '[Memory Context ...]' header;
+                // keep 'Active memory space' FIRST so the model always knows the
+                // bound space before reading any facts.
                 const guidance =
-                    '[Memory Context (from local supermemory)]\n' +
-                    (profileText ? profileText + '\n\n' : '') +
-                    'Active memory space: ' + active + '\n' +
+                    'Active memory space: ' + active + '\n\n' +
+                    (profileText ? profileText : '') +
+                    (profileText ? '\n\n' : '') +
                     '[SYSTEM INSTRUCTION] Memory queries default to the active memory space above.';
                 injectContext(ctx, session, guidance);
             } catch (error) {
