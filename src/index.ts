@@ -68,6 +68,8 @@ interface SupermemoryConfig {
     openaiApiKey: string;
     openaiBaseUrl: string;
     openaiModel: string;
+    /** Currently selected memory container tag (persisted across sessions). */
+    activeContainer: string;
 }
 
 /** Settings namespace schema: where to reach the local Supermemory server. */
@@ -79,6 +81,7 @@ const SUPERMEMORY_SCHEMA = z.object({
     openaiApiKey: z.string().default(''),
     openaiBaseUrl: z.string().default('https://token-plan-cn.xiaomimimo.com/v1'),
     openaiModel: z.string().default('mimo-v2.5'),
+    activeContainer: z.string().default(''),
 });
 
 /** Required services: the web route registry, the user-settings seam, the tool registry, and the agent factory (for context injection). */
@@ -119,6 +122,7 @@ function resolveConfig(scope: SettingsScope<any>): SupermemoryConfig {
         openaiApiKey: (value?.openaiApiKey as string | undefined) ?? '',
         openaiBaseUrl: (value?.openaiBaseUrl as string | undefined) ?? 'https://token-plan-cn.xiaomimimo.com/v1',
         openaiModel: (value?.openaiModel as string | undefined) ?? 'mimo-v2.5',
+        activeContainer: (value?.activeContainer as string | undefined) ?? '',
     };
 }
 
@@ -435,6 +439,35 @@ async function handleApi(
         if (method === 'GET' && pathname === API_PREFIX + '/config') {
             return sendJson(res, 200, resolveConfig(scope));
         }
+        if (method === 'GET' && pathname === API_PREFIX + '/containers') {
+            const { base, apiKey } = requireUpstream(scope);
+            try {
+                const listRes = await fetch(base + '/v3/documents/list', {
+                    method: 'POST',
+                    headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
+                    body: JSON.stringify({ containerTag: DEFAULT_CONTAINER, limit: 1000 }),
+                    signal: AbortSignal.timeout(8000),
+                });
+                if (!listRes.ok) {
+                    return sendJson(res, listRes.status, { error: 'upstream list failed' });
+                }
+                const listData = (await listRes.json()) as { memories?: Array<{ id: string; containerTag?: string }> };
+                const docs = listData.memories ?? [];
+                // Group by containerTag (falling back to DEFAULT_CONTAINER for legacy docs)
+                const counts = new Map<string, number>();
+                for (const d of docs) {
+                    const tag = (d as Record<string, unknown>).containerTag as string || DEFAULT_CONTAINER;
+                    counts.set(tag, (counts.get(tag) ?? 0) + 1);
+                }
+                // Ensure DEFAULT_CONTAINER is always listed
+                if (!counts.has(DEFAULT_CONTAINER)) counts.set(DEFAULT_CONTAINER, 0);
+                const containers = [...counts.entries()].map(([tag, count]) => ({ tag, count }));
+                const active = activeContainer(scope);
+                return sendJson(res, 200, { containers, active });
+            } catch (e) {
+                return sendJson(res, 502, { error: 'cannot reach supermemory' });
+            }
+        }
         if (method === 'POST' && pathname === API_PREFIX + '/config') {
             const body = JSON.parse((await readBody(req)) || '{}') as { patch?: unknown };
             if (!body.patch || typeof body.patch !== 'object' || Array.isArray(body.patch)) {
@@ -466,6 +499,12 @@ function requireUpstream(scope: SettingsScope<any>): { base: string; apiKey: str
         throw new Error('supermemory API key not configured — open dsh Settings → Supermemory and paste the API key from localhost:6767.');
     }
     return { base: upstreamBase(cfg), apiKey: cfg.apiKey };
+}
+
+/** Resolve the active memory container: settings.activeContainer if set, else DEFAULT_CONTAINER. */
+function activeContainer(scope: SettingsScope<any>): string {
+    const cfg = resolveConfig(scope);
+    return cfg.activeContainer?.trim() || DEFAULT_CONTAINER;
 }
 
 /** Narrow one tool argument to a string with a fallback. */
@@ -500,7 +539,7 @@ function makeSearchTool(scope: SettingsScope<any>): ToolDefinition {
                 containerTag: {
                     type: 'string',
                     description: 'Scope the search to one container tag.',
-                    default: DEFAULT_CONTAINER,
+                    default: '',
                 },
                 limit: {
                     type: 'number',
@@ -538,7 +577,7 @@ function makeSearchTool(scope: SettingsScope<any>): ToolDefinition {
             const a = (args ?? {}) as { query?: unknown; containerTag?: unknown; limit?: unknown };
             const query = argString(a.query, '');
             if (!query) throw new Error('supermemory_search: query (non-empty string) is required');
-            const tag = argString(a.containerTag, DEFAULT_CONTAINER);
+            const tag = argString(a.containerTag, activeContainer(scope));
             const raw = typeof a.limit === 'number' && Number.isFinite(a.limit) ? Math.floor(a.limit) : 5;
             const limit = Math.min(20, Math.max(1, raw));
             const { base, apiKey } = requireUpstream(scope);
@@ -591,7 +630,7 @@ function makeSaveTool(scope: SettingsScope<any>): ToolDefinition {
                 containerTag: {
                     type: 'string',
                     description: 'Container tag to save under.',
-                    default: DEFAULT_CONTAINER,
+                    default: '',
                 },
             },
             required: ['content'],
@@ -614,7 +653,7 @@ function makeSaveTool(scope: SettingsScope<any>): ToolDefinition {
             if (!content) throw new Error('supermemory_save: content (non-empty string) is required');
             if (content.length > 10000) throw new Error('supermemory_save: content exceeds 10000 chars');
             const isStatic = a.isStatic === true;
-            const tag = argString(a.containerTag, DEFAULT_CONTAINER);
+            const tag = argString(a.containerTag, activeContainer(scope));
             const { base, apiKey } = requireUpstream(scope);
             const res = await fetch(base + '/v4/memories', {
                 method: 'POST',
@@ -658,7 +697,7 @@ function makeForgetTool(scope: SettingsScope<any>): ToolDefinition {
                 containerTag: {
                     type: 'string',
                     description: 'Container tag / space the forget operation is scoped to.',
-                    default: DEFAULT_CONTAINER,
+                    default: '',
                 },
                 dryRun: {
                     type: 'boolean',
@@ -714,7 +753,7 @@ function makeForgetTool(scope: SettingsScope<any>): ToolDefinition {
                 throw new Error('supermemory_forget: provide either ids (non-empty array) or query (non-empty string)');
             }
             if (ids.length > 500) throw new Error('supermemory_forget: at most 500 ids');
-            const tag = argString(a.containerTag, DEFAULT_CONTAINER);
+            const tag = argString(a.containerTag, activeContainer(scope));
             const dryRun = a.dryRun === true;
             const rawThreshold = typeof a.threshold === 'number' && Number.isFinite(a.threshold) ? a.threshold : 0.5;
             const threshold = Math.min(1, Math.max(0, rawThreshold));
@@ -1072,7 +1111,7 @@ async function persistTurn(
             headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
             body: JSON.stringify({
                 content: text,
-                containerTag: DEFAULT_CONTAINER,
+                containerTag: activeContainer(scope),
                 customId,
                 taskType: 'memory',
                 dreaming: 'dynamic',
@@ -1107,6 +1146,99 @@ function isSubagent(session: Session): boolean {
 /** Sessions that already received a profile injection (one per session). */
 const injectedSessions = new Set<string>();
 
+/**
+ * Select-memory tool: called by the model after the user picks a memory
+ * container. Saves the choice, fetches the profile, and injects it.
+ */
+function makeSelectMemoryTool(scope: SettingsScope<any>, ctx: Context): ToolDefinition {
+    return {
+        name: 'supermemory_select_memory',
+        description:
+            'Complete the memory-space selection for this session. Call this after the user picks ' +
+            'a container tag (via ask_user_question). It saves the choice, fetches the profile for ' +
+            'that container, and injects the memory context into the session.',
+        parameters: {
+            type: 'object',
+            properties: {
+                containerTag: {
+                    type: 'string',
+                    description: 'The container tag the user selected or created.',
+                },
+            },
+            required: ['containerTag'],
+        },
+        output: {
+            schema: {
+                type: 'object',
+                properties: {
+                    containerTag: { type: 'string' },
+                    profileInjected: { type: 'boolean' },
+                    staticCount: { type: 'number' },
+                    dynamicCount: { type: 'number' },
+                    summary: { type: 'string' },
+                },
+                required: ['containerTag', 'profileInjected', 'summary'],
+                additionalProperties: false,
+            },
+            render: (_args, value) => {
+                const v = value as { summary?: string };
+                return [{ type: 'text', text: v.summary ?? 'Memory space selected.' }];
+            },
+        },
+        execute: async (args) => {
+            const a = (args ?? {}) as { containerTag?: unknown };
+            const tag = argString(a.containerTag, '');
+            if (!tag) throw new Error('supermemory_select_memory: containerTag (non-empty string) is required');
+
+            // Save the selection to settings.
+            await scope.update({ activeContainer: tag });
+
+            // Fetch the profile for the selected container.
+            const { base, apiKey } = requireUpstream(scope);
+            let staticCount = 0;
+            let dynamicCount = 0;
+            try {
+                const res = await fetch(base + '/v4/profile', {
+                    method: 'POST',
+                    headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
+                    body: JSON.stringify({ containerTag: tag }),
+                    signal: AbortSignal.timeout(10000),
+                });
+                if (res.ok) {
+                    const data = (await res.json()) as { profile?: { static?: string[]; dynamic?: string[] } };
+                    const lines: string[] = [];
+                    const stat = data.profile?.static ?? [];
+                    const dyn = data.profile?.dynamic ?? [];
+                    staticCount = stat.length;
+                    dynamicCount = dyn.length;
+                    if (stat.length > 0) lines.push('Long-term facts (static):\n- ' + stat.join('\n- '));
+                    if (dyn.length > 0) lines.push('Recent context (dynamic):\n- ' + dyn.join('\n- '));
+                    const profileText = lines.join('\n\n');
+                    if (profileText) {
+                        // Inject into the current session's agent.
+                        const rootId = ctx.agents.roots()[0]?.id;
+                        if (rootId) {
+                            const agent = ctx.agents.get(rootId);
+                            if (agent) {
+                                agent.inject(createUserMessage({
+                                    content: [{ type: 'text', text: '[Memory Context (container: ' + tag + ')]\n' + profileText }],
+                                    source: { kind: 'plugin', plugin: '@crack/dsh-supermemory', form: 'recall' },
+                                }));
+                            }
+                        }
+                    }
+                }
+            } catch {
+                // Profile fetch failed — not fatal, just no context injected.
+            }
+
+            const summary = 'Memory space "' + tag + '" selected. Injected ' + staticCount + ' long-term facts + ' + dynamicCount + ' recent context entries. You can now answer the user\'s questions.';
+            return { containerTag: tag, profileInjected: true, staticCount, dynamicCount, summary };
+        },
+        timeoutMs: 15000,
+    };
+}
+
 function apply(ctx: Context): void {
     // "supermemory" settings namespace: dsh rc.7 renders it as a settings card
     // (the client half registers the slot entry); `applies: 'live'` means card
@@ -1132,16 +1264,50 @@ function apply(ctx: Context): void {
             ctx.tools.register(makeSaveTool(scope)),
             ctx.tools.register(makeForgetTool(scope)),
             ctx.tools.register(makeDeleteDocumentTool(scope)),
+            ctx.tools.register(makeSelectMemoryTool(scope, ctx)),
             // Deterministic read: inject the stored profile at session start.
             ctx.on('session/created', (session) => {
                 if (isSubagent(session)) return;
                 if (injectedSessions.has(session.id)) return;
                 injectedSessions.add(session.id);
-                fetchProfile(scope)
-                    .then((text) => {
-                        if (text) injectContext(ctx, session, text);
-                    })
-                    .catch((error) => ctx.logger.warn('supermemory profile inject:', error));
+                // Fetch container list and inject a guidance message so the model
+                // asks the user to pick a memory space before proceeding.
+                void (async () => {
+                    try {
+                        const { base, apiKey } = requireUpstream(scope);
+                        const listRes = await fetch(base + '/v3/documents/list', {
+                            method: 'POST',
+                            headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
+                            body: JSON.stringify({ containerTag: DEFAULT_CONTAINER, limit: 1000 }),
+                            signal: AbortSignal.timeout(8000),
+                        });
+                        let containerLines = '- ' + DEFAULT_CONTAINER + ' (default)';
+                        if (listRes.ok) {
+                            const listData = (await listRes.json()) as { memories?: Array<Record<string, unknown>> };
+                            const docs = listData.memories ?? [];
+                            const counts = new Map<string, number>();
+                            for (const d of docs) {
+                                const tag = (d.containerTag as string) || DEFAULT_CONTAINER;
+                                counts.set(tag, (counts.get(tag) ?? 0) + 1);
+                            }
+                            if (!counts.has(DEFAULT_CONTAINER)) counts.set(DEFAULT_CONTAINER, 0);
+                            containerLines = [...counts.entries()]
+                                .map(([tag, count]) => '- ' + tag + ' (' + count + ' docs)')
+                                .join('\n');
+                        }
+                        const guidance =
+                            '[SYSTEM: Memory Space Selection Required]\n' +
+                            'Before answering the user, you MUST ask them to select a memory space using ask_user_question.\n' +
+                            'Available memory spaces:\n' + containerLines + '\n' +
+                            'Always include a "+ New space" option. If the user picks it, ask for a name.\n' +
+                            'After the user selects (or creates) a space, call supermemory_select_memory with the containerTag.\n' +
+                            'That tool will inject the memory profile automatically. Do NOT answer the user\'s question until this is done.\n' +
+                            'Keep the selection prompt brief — the user\'s original question will be handled after memory is loaded.';
+                        injectContext(ctx, session, guidance);
+                    } catch (error) {
+                        ctx.logger.warn('supermemory session init:', error);
+                    }
+                })();
             }),
             // Deterministic write: persist each finished turn.
             ctx.on('session/event', (session, event) => {
