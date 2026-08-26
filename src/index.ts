@@ -490,7 +490,7 @@ async function handleApi(
 
 
 /** Default container tag for memory tools (plugin/development workspace). */
-const DEFAULT_CONTAINER = 'plugin-dev';
+const DEFAULT_CONTAINER = 'code-dev';
 
 /** Resolve + guard: the configured upstream and key, or a throw the registry turns into an error result. */
 function requireUpstream(scope: SettingsScope<any>): { base: string; apiKey: string } {
