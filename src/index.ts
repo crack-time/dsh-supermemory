@@ -1228,6 +1228,172 @@ function makeSelectMemoryTool(scope: SettingsScope<any>, ctx: Context): ToolDefi
     };
 }
 
+/**
+ * List-containers tool: show all memory spaces with their fact counts.
+ */
+function makeListContainersTool(scope: SettingsScope<any>): ToolDefinition {
+    return {
+        name: 'supermemory_list_containers',
+        description: 'List all memory spaces (container tags) with their fact counts. Use this to see what spaces exist before selecting one.',
+        parameters: {
+            type: 'object',
+            properties: {},
+        },
+        output: {
+            schema: {
+                type: 'object',
+                properties: {
+                    containers: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                tag: { type: 'string' },
+                                staticCount: { type: 'number' },
+                                dynamicCount: { type: 'number' },
+                            },
+                            required: ['tag'],
+                        },
+                    },
+                    active: { type: 'string' },
+                },
+                required: ['containers', 'active'],
+                additionalProperties: false,
+            },
+            render: (_args, value) => {
+                const v = value as { containers?: Array<{ tag: string; staticCount?: number; dynamicCount?: number }>; active?: string };
+                const lines = (v.containers ?? []).map((c) => {
+                    const marker = c.tag === v.active ? ' (active)' : '';
+                    return '  - ' + c.tag + marker + ': ' + (c.staticCount ?? 0) + ' static + ' + (c.dynamicCount ?? 0) + ' dynamic';
+                });
+                const header = 'Memory spaces (' + (v.containers ?? []).length + '):';
+                return [{ type: 'text', text: header + '\n' + lines.join('\n') }];
+            },
+        },
+        execute: async () => {
+            const { base, apiKey } = requireUpstream(scope);
+            const active = activeContainer(scope);
+            // Discover known tags from recent search hits + hardcoded defaults
+            const knownTags = new Set<string>([active, 'sm_project_default']);
+            // Probe with a broad search to discover additional tags
+            try {
+                const searchRes = await fetch(base + '/v4/search', {
+                    method: 'POST',
+                    headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
+                    body: JSON.stringify({ q: 'project memory space', limit: 50 }),
+                    signal: AbortSignal.timeout(8000),
+                });
+                if (searchRes.ok) {
+                    const data = await searchRes.json() as { memories?: Array<{ containerTag?: string }> };
+                    for (const m of data.memories ?? []) {
+                        if (m.containerTag) knownTags.add(m.containerTag);
+                    }
+                }
+            } catch { /* optional */ }
+
+            const containers: Array<{ tag: string; staticCount: number; dynamicCount: number }> = [];
+            for (const tag of knownTags) {
+                try {
+                    const res = await fetch(base + '/v4/profile', {
+                        method: 'POST',
+                        headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
+                        body: JSON.stringify({ containerTag: tag }),
+                        signal: AbortSignal.timeout(5000),
+                    });
+                    if (res.ok) {
+                        const data = await res.json() as { profile?: { static?: string[]; dynamic?: string[] } };
+                        containers.push({
+                            tag,
+                            staticCount: (data.profile?.static ?? []).length,
+                            dynamicCount: (data.profile?.dynamic ?? []).length,
+                        });
+                    }
+                } catch { /* skip */ }
+            }
+            return { containers, active };
+        },
+        timeoutMs: 20000,
+    };
+}
+
+/**
+ * List-documents tool: show documents in a memory space.
+ */
+function makeListDocumentsTool(scope: SettingsScope<any>): ToolDefinition {
+    return {
+        name: 'supermemory_list_documents',
+        description: 'List documents stored in a specific memory space (container tag). Returns document ids, titles, and metadata. Use this to review what is stored before deleting or managing documents.',
+        parameters: {
+            type: 'object',
+            properties: {
+                containerTag: {
+                    type: 'string',
+                    description: 'Container tag to list documents from.',
+                    default: '',
+                },
+                limit: {
+                    type: 'number',
+                    description: 'Maximum documents to return (1-1000).',
+                    default: 100,
+                },
+            },
+        },
+        output: {
+            schema: {
+                type: 'object',
+                properties: {
+                    containerTag: { type: 'string' },
+                    total: { type: 'number' },
+                    documents: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                id: { type: 'string' },
+                                title: { type: 'string' },
+                                status: { type: 'string' },
+                                createdAt: { type: 'string' },
+                            },
+                            required: ['id'],
+                        },
+                    },
+                },
+                required: ['containerTag', 'total', 'documents'],
+                additionalProperties: false,
+            },
+            render: (_args, value) => {
+                const v = value as { containerTag?: string; total?: number; documents?: Array<{ id: string; title?: string }> };
+                const lines = (v.documents ?? []).slice(0, 20).map((d, i) => {
+                    const t = (d.title || '').replace(/\n/g, ' ').slice(0, 80);
+                    return (i + 1) + '. [' + d.id.slice(0, 10) + '] ' + t;
+                });
+                const more = (v.total ?? 0) > 20 ? '\n... and ' + ((v.total ?? 0) - 20) + ' more' : '';
+                return [{ type: 'text', text: 'Documents in "' + v.containerTag + '" (' + v.total + '):\n' + lines.join('\n') + more }];
+            },
+        },
+        execute: async (args) => {
+            const a = (args ?? {}) as { containerTag?: unknown; limit?: unknown };
+            const tag = argString(a.containerTag, activeContainer(scope));
+            const rawLimit = typeof a.limit === 'number' ? a.limit : 100;
+            const limit = Math.min(1000, Math.max(1, Math.floor(rawLimit)));
+            const { base, apiKey } = requireUpstream(scope);
+            const res = await fetch(base + '/v3/documents/list', {
+                method: 'POST',
+                headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
+                body: JSON.stringify({ containerTag: tag, limit }),
+                signal: AbortSignal.timeout(15000),
+            });
+            if (!res.ok) {
+                throw new Error('supermemory /v3/documents/list failed: HTTP ' + res.status + ' — ' + (await res.text()).slice(0, 200));
+            }
+            const data = (await res.json()) as { memories?: Array<{ id: string; title?: string; status?: string; createdAt?: string }> };
+            const docs = data.memories ?? [];
+            return { containerTag: tag, total: docs.length, documents: docs };
+        },
+        timeoutMs: 20000,
+    };
+}
+
 function apply(ctx: Context): void {
     // "supermemory" settings namespace: dsh rc.7 renders it as a settings card
     // (the client half registers the slot entry); `applies: 'live'` means card
@@ -1254,6 +1420,8 @@ function apply(ctx: Context): void {
             ctx.tools.register(makeForgetTool(scope)),
             ctx.tools.register(makeDeleteDocumentTool(scope)),
             ctx.tools.register(makeSelectMemoryTool(scope, ctx)),
+            ctx.tools.register(makeListContainersTool(scope)),
+            ctx.tools.register(makeListDocumentsTool(scope)),
             // Deterministic read: inject the stored profile at session start.
             ctx.on('session/created', (session) => {
                 if (isSubagent(session)) return;
