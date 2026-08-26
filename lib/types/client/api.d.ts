@@ -12,4 +12,6 @@ export declare const API_URLS: {
     readonly health: string;
     readonly containers: string;
     readonly activeContainer: string;
+    /** Per-session container: GET /api/session/:id/container */
+    readonly sessionContainer: (sessionId: string) => string;
 };

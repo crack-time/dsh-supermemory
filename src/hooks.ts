@@ -178,6 +178,11 @@ const injectedSessions = new Set<string>();
  */
 const sessionContainerRef = new Map<string, string>();
 
+/** Look up the container a session was bound to at creation time. */
+export function getSessionContainer(sessionId: string): string | undefined {
+    return sessionContainerRef.get(sessionId);
+}
+
 // ---------------------------------------------------------------------------
 // Turn persistence — one document per finished turn (low-value turns are
 // filtered out before reaching this point).

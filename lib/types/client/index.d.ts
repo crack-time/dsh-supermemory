@@ -2,23 +2,23 @@
  * Client loader entry for the Supermemory proxy.
  *
  * Registers the settings-dialog card for the "supermemory" namespace
- * (base URL + API key + memory-space dropdown + a connection test). The
- * memory/search experience stays on Supermemory's own bundled dashboard
- * (localhost:6767); this plugin only makes that server reachable through
- * dsh's own origin.
+ * (base URL + API key + memory-space dropdown + a connection test) and
+ * a header badge that shows the active memory container name in the
+ * session header area. The memory/search experience stays on Supermemory's
+ * own bundled dashboard (localhost:6767); this plugin only makes that
+ * server reachable through dsh's own origin.
  */
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
 import { CARD_LOCALE } from './card-locale.ts';
 /**
- * Local declaration merging for the seats this card occupies.
+ * Local declaration merging for the seats this plugin occupies.
  *
  * The real services are declared by the dsh web shell at runtime
  * (dsh-client-locale's `ctx.locale`, dsh-client-ui-settings-plugins'
- * `settings.plugin.item` keyed slot). Those packages are NOT build-time
- * dependencies of this plugin, so we mirror just the faces we touch —
- * the slot key, its keyed owner, and our locale namespace. Kept
- * deliberately small: if the shell changes the contract, the type error
- * here points at exactly what must be revisited.
+ * `settings.plugin.item` keyed slot, dsh-client-ui-conversation's
+ * `conversation.session.header.actions` list slot). Those packages are
+ * NOT build-time dependencies of this plugin, so we mirror just the faces
+ * we touch — the slot keys, their owners, and our locale namespace.
  */
 declare module '@deepseek-ai/dsh-client-ui-slots' {
     interface SlotMap {
@@ -29,6 +29,11 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
             owner: {
                 children?: never;
             };
+        };
+        /** Badge chip in the session header (next to the agent-preset label). */
+        'conversation.session.header.actions': {
+            kind: 'list';
+            scope: 'session';
         };
     }
     interface LocaleNamespaceMap {

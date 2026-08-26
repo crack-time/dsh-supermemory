@@ -13,6 +13,7 @@ import {
     setActiveContainer,
     activeContainer,
 } from './config.ts';
+import { getSessionContainer } from './hooks.ts';
 import { discoverContainers } from './containers.ts';
 import type { ManagedServer } from './managed-server.ts';
 
@@ -188,6 +189,18 @@ export async function handleApi(
             await managed.sync(scope, ctx); // reconcile the managed process after save
             // Never echo the plaintext key back — clients get the masked view.
             return sendJson(res, 200, clientConfig(scope));
+        }
+        // Per-session container lookup: returns the session's snapshot first,
+        // then falls back to the current global setting.
+        const sessionContainerMatch = method === 'GET' && pathname.startsWith(API_PREFIX + '/session/')
+            && pathname.endsWith('/container');
+        if (sessionContainerMatch) {
+            const sid = pathname.slice(
+                (API_PREFIX + '/session/').length,
+                pathname.length - '/container'.length,
+            );
+            const tag = getSessionContainer(sid) ?? activeContainer(scope);
+            return sendJson(res, 200, { containerTag: tag });
         }
         if (method === 'PUT' && pathname === API_PREFIX + '/active-container') {
             // Dedicated, validated switch path used by the settings card —
