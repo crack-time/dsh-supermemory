@@ -8,6 +8,7 @@
 - 在 GUI **设置 → 插件 → 插件配置** 页新增「Supermemory 代理」卡片，与内置 shell / agent-loop / web-search 卡片同款可折叠外观（设计令牌驱动，明暗主题自适应）
 - **服务地址**：上游 supermemory 地址，留空默认 `http://localhost:6767`
 - **API Key**：直接文本框粘贴保存（在 localhost:6767 首页可查看）
+- **当前记忆空间**：下拉选择器 —— 列出所有容器（含 static/dynamic 记忆计数），可**新建空间**；选择即保存为 `activeContainer`，新会话自动注入该空间的记忆上下文。下拉展开时按 60 秒缓存时效自动刷新
 - **托管本地服务器**：exe 路径 + OPENAI_* 三项 + 托管状态（详见下文「托管本地服务器进程」）
 - **测试连接**：一键探测配置是否生效、上游是否可达
 - 暂存式保存 / 放弃修改 + 「未保存」徽章；设置通过宿主 `ctx.settings` 持久化，改动即时生效、无需重启
@@ -20,21 +21,28 @@
 ### 健康检查与配置接口
 - `GET /health` —— 当前配置 + 对上游 `/v3/settings` 的可达性探测
 - `GET /config`、`POST /config`（`{ patch }` 合并，schemastery 校验）—— 设置读写
+- `GET /containers` —— 列出全部容器（tag + static/dynamic 记忆数 + 文档数）
+- `PUT /active-container` —— 专门、经校验的记忆空间切换端点（卡片下拉与工具共用）
 
 ### AI 记忆工具（原生 dsh 工具，无需 MCP）
-插件 host 端直接把三个工具注册进 dsh 工具运行时（与 `run_code` / `web_search` 同一套机制），**只服务 dsh**：
+插件 host 端把七个工具直接注册进 dsh 工具运行时（与 `run_code` / `web_search` 同一套机制），**只服务 dsh**：
 
 - `supermemory_search` —— 语义检索记忆库（跨语言），把相关记忆带回对话
 - `supermemory_save` —— 把实体化事实写入记忆库，实时生成向量、立即可搜
-- `supermemory_forget` —— 删除记忆：精确 ids / 语义短语，`dryRun` 预览（语义删除会误伤相似旧记忆，务必先用 dryRun 预览）
+- `supermemory_forget` —— 删除记忆：精确 ids / 语义短语，`dryRun` 预览
+- `supermemory_delete_document` —— 删除原始对话文档（级联删除其产生的记忆，需 `confirm:true`）
+- `supermemory_select_memory` —— 模型驱动的空间切换路径（用户明确要求时；常规切换用设置卡片）
+- `supermemory_list_containers` —— 列出所有空间及其 static/dynamic 记忆数
+- `supermemory_list_documents` —— 列出某空间内的文档
 
-三个工具 host 端直连上游并注入配置的 API Key（与代理同一密钥源，无第二处凭据），模型不接触密钥。**不需要 MCP**：工具只在 dsh 内使用，MCP 桥只在需要跨客户端（Claude/Cursor 等）共享记忆时才值得引入。
+七个工具 host 端直连上游并注入配置的 API Key（与代理同一密钥源，无第二处凭据），模型不接触密钥。**不需要 MCP**：工具只在 dsh 内使用，MCP 桥只在需要跨客户端（Claude/Cursor 等）共享记忆时才值得引入。
 
 ### 确定性记忆钩子（免工具 · 每会话注入 + 每轮写库）
 host 端监听 dsh 会话事件，实现“零操作记忆”：
 
-- **session/created → 注入记忆上下文**：会话创建时拉取 /v4/profile（长期事实 static + 近期动态 dynamic），作为第一条 user 消息注入（agent.inject），每会话一次；子代理会话跳过
+- **session/created → 注入记忆上下文**：会话创建时拉取 `activeContainer` 的 /v4/profile（长期事实 static + 近期动态 dynamic），连同容器清单作为第一条 user 消息注入（agent.inject），每会话一次；上游未就绪时最多重试 4 次（退避等待托管服务启动）；子代理会话跳过
 - **turn/end → 逐轮写库**：每轮结束后把该轮文本（真实用户消息 + 助手回复 + 工具调用）POST 成 supermemory 文档（POST /v3/documents，customId=sessionId-turn-N、taskType=memory、dreaming=dynamic、documentDate=该轮时间），索引约 30–60 秒后成为可检索的动态记忆；子代理会话跳过
+- **低值过滤**：纯确认/单一字符/命令式回复（“确认”“A”“do it”…）不写库
 - **策略**：每轮都写，不做“关键才写”过滤（关键无法定义）；上下文注入顺序 系统提示词 → 记忆 → 用户消息 → 权限 → 技能
 
 ### 托管本地服务器进程（默认随 dsh 启停）
@@ -47,6 +55,25 @@ host 端监听 dsh 会话事件，实现“零操作记忆”：
 - 保存配置会自动用最新配置重启；崩溃不会自动无限重启（状态可见，必要时重启 dsh web 重新拉起）
 - 清空路径则不会自动启动（卡片会提示「请先填写服务器可执行文件路径并保存」）
 
+## 源码结构
+
+模块化拆分（单一职责，依赖方向单向）：
+
+```
+src/
+├── index.ts           # 编排入口（apply + inject）
+├── config.ts          # 设置 schema + 配置解析 + 统一切换路径
+├── managed-server.ts  # 托管 supermemory 进程类
+├── http.ts            # 反向代理 + 健康检查 + /api 路由
+├── containers.ts      # 容器发现（并行 profile 请求）+ 计数
+├── tools.ts           # 七个记忆工具
+├── hooks.ts           # session/created 注入 + turn/end 写库（含低值过滤）
+└── client/
+    ├── index.ts       # client 入口（slot 注册 + 本地声明合并）
+    ├── card.tsx       # 设置卡片组件
+    ├── card-locale.ts # 卡片 i18n 字典
+    └── card-css.ts    # 卡片样式（注入一次）
+```
 
 ## 安装
 
@@ -74,14 +101,14 @@ dsh plugin --profile web add "link:E:\path\to\dsh-supermemory"
 fetch('/plugins/@crack/dsh-supermemory/api/v4/search', {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({ q: '最近修复了什么问题', containerTag: 'sm_project_default' }),
+  body: JSON.stringify({ q: '最近修复了什么问题', containerTag: 'code-dev' }),
 })
 
 // 写入记忆
 fetch('/plugins/@crack/dsh-supermemory/api/v4/memories', {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({ memories: [{ content: '…' }], containerTag: 'sm_project_default' }),
+  body: JSON.stringify({ memories: [{ content: '…' }], containerTag: 'code-dev' }),
 })
 ```
 
@@ -92,31 +119,10 @@ fetch('/plugins/@crack/dsh-supermemory/api/v4/memories', {
 需要 Node + pnpm；**dsh 运行时与 devDependencies 均钉定 0.1.0-rc.7**（设置卡片为 rc.7 新能力）。
 
 ```powershell
-pnpm install          # 安装构建链（typescript / tsdown）
+pnpm install          # 安装构建链（typescript / tsdown + client 类型包）
 pnpm run build        # 一次构建：tsc(host) + tsc(client) + tsdown
 pnpm run typecheck    # 类型检查
 ```
 
 - 构建后刷新浏览器页面即可加载新客户端 bundle（服务器按内容哈希提供 `lib/client.js`）
-- 卡片样式为原生 PluginCard 同款值 + dsw 设计令牌（`--dsw-alias-*`），内联注入，不依赖任何其他插件
-
-## 项目结构
-
-```
-dsh-supermemory/
-├── src/index.ts                    # host 面：settings 命名空间 + 反向代理 / health / config 路由
-├── src/client/index.ts             # 浏览器端入口（apply）：卡片注册 + 样式注入
-├── src/client/card.tsx             # 设置弹窗卡片（原生 PluginCard 同款外观）
-├── tsconfig.json / tsconfig.client.json  # host/client 双 program
-├── tsdown.config.ts                # client bundle 协议构建
-├── lib/client.js                   # 浏览器端 bundle（已构建，clone 即用）
-├── lib/index.js                    # 宿主端入口
-├── cordis.patch.yml                # 插件自带注册 patch（参考）
-└── package.json                    # dsh.client 声明（devDeps 钉定 0.1.0-rc.7）
-```
-
-## 说明
-
-- 不修改 DSH 自带代码；supermemory 本体（`localhost:6767`）通常由本插件托管、随 dsh web 自动启停，也可外部运行（探测到外部实例时不重复拉起），本插件负责同源桥接、配置管理与记忆自动化
-- API Key 仅存于 dsh 服务端用户设置中，浏览器与仓库均不接触密钥
-- 逐轮写库会持续增长：每轮一个文档约 30–60 秒后成为可检索的动态记忆；当前为“每轮全写”（不做关键过滤），后续如需控制可在配置层再加过滤策略
+- host 端代码改动需重启 dsh web 生效
