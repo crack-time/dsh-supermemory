@@ -126,7 +126,7 @@ function injectContext(ctx: Context, session: Session, text: string): void {
     if (!agent) return;
     try {
         agent.inject(createUserMessage({
-            content: [{ type: 'text', text: '[Memory Context (from local supermemory)]\n' + text }],
+            content: [{ type: 'text', text: '[Memory Context (from local supermemory)]\n\n' + text }],
             source: { kind: 'plugin', plugin: '@crack/dsh-supermemory', form: 'recall' },
         }));
     }
