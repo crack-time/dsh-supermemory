@@ -489,8 +489,8 @@ async function handleApi(
 }
 
 
-/** Default container tag for memory tools (mirrors the supermemory dashboard's "Default Project"). */
-const DEFAULT_CONTAINER = 'sm_project_default';
+/** Default container tag for memory tools (plugin/development workspace). */
+const DEFAULT_CONTAINER = 'plugin-dev';
 
 /** Resolve + guard: the configured upstream and key, or a throw the registry turns into an error result. */
 function requireUpstream(scope: SettingsScope<any>): { base: string; apiKey: string } {
