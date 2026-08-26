@@ -25,13 +25,12 @@
 - `PUT /active-container` —— 专门、经校验的记忆空间切换端点（卡片下拉与工具共用）
 
 ### AI 记忆工具（原生 dsh 工具，无需 MCP）
-插件 host 端把七个工具直接注册进 dsh 工具运行时（与 `run_code` / `web_search` 同一套机制），**只服务 dsh**：
+插件 host 端把六个工具直接注册进 dsh 工具运行时（与 `run_code` / `web_search` 同一套机制），**只服务 dsh**：
 
 - `supermemory_search` —— 语义检索记忆库（跨语言），把相关记忆带回对话
 - `supermemory_save` —— 把实体化事实写入记忆库，实时生成向量、立即可搜
 - `supermemory_forget` —— 删除记忆：精确 ids / 语义短语，`dryRun` 预览
 - `supermemory_delete_document` —— 删除原始对话文档（级联删除其产生的记忆，需 `confirm:true`）
-- `supermemory_select_memory` —— 模型驱动的空间切换路径（用户明确要求时；常规切换用设置卡片）
 - `supermemory_list_containers` —— 列出所有空间及其 static/dynamic 记忆数
 - `supermemory_list_documents` —— 列出某空间内的文档
 

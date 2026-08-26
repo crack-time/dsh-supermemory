@@ -53,8 +53,8 @@ export declare function requireUpstream(scope: SettingsScope<any>): {
 };
 /** Resolve the active memory container: settings.activeContainer if set, else DEFAULT_CONTAINER. */
 export declare function activeContainer(scope: SettingsScope<any>): string;
-/** Persist the active memory container choice (used by the settings card
- * via POST /config and by the select-memory tool — one shared write path). */
+/** Persist the active memory container choice (the settings card's single
+ * write path — via POST /config or the dedicated PUT /active-container). */
 export declare function setActiveContainer(scope: SettingsScope<any>, tag: string): Promise<void>;
 /** Narrow one tool argument to a string with a fallback. */
 export declare function argString(value: unknown, fallback: string): string;

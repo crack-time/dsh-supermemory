@@ -138,6 +138,15 @@ function injectContext(ctx: Context, session: Session, text: string): void {
 /** Sessions that already received a profile injection (one per session). */
 const injectedSessions = new Set<string>();
 
+/**
+ * Per-session container snapshot, taken at session/created and used by
+ * turn/end persistence — so injection and writes stay bound to the SAME
+ * space even if the user switches the global activeContainer mid-session
+ * (the switch only affects NEW sessions). Missing entry falls back to the
+ * live global setting (legacy sessions created before this snapshot).
+ */
+const sessionContainerRef = new Map<string, string>();
+
 // ---------------------------------------------------------------------------
 // Turn persistence — one document per finished turn (low-value turns are
 // filtered out before reaching this point).
@@ -172,12 +181,15 @@ async function persistTurn(
             .replace(/[^A-Za-z0-9_.-]/g, '-')
             .slice(0, 100);
         const workspace = await workspaceOf(ctx, session);
+        // Container binding: session snapshot wins (taken at session/created);
+        // fall back to the live setting for legacy sessions without one.
+        const containerTag = sessionContainerRef.get(session.id) ?? activeContainer(scope);
         const res = await fetch(base + '/v3/documents', {
             method: 'POST',
             headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
             body: JSON.stringify({
                 content: text,
-                containerTag: activeContainer(scope),
+                containerTag,
                 customId,
                 taskType: 'memory',
                 dreaming: 'dynamic',
@@ -215,6 +227,12 @@ function isSubagent(session: Session): boolean {
 export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): Array<() => void> {
     const disposers: Array<() => void> = [];
 
+    // Release per-session state when a session leaves the store.
+    disposers.push(ctx.on('session/disposed', (session) => {
+        injectedSessions.delete(session.id);
+        sessionContainerRef.delete(session.id);
+    }));
+
     disposers.push(ctx.on('session/created', (session) => {
         if (isSubagent(session)) return;
         if (injectedSessions.has(session.id)) return;
@@ -242,6 +260,10 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
                     .join('\n') || '- ' + activeContainer(scope) + ' (default, 0 memories)';
 
                 const active = activeContainer(scope);
+                // Snapshot the container for THIS session: turn/end persistence
+                // uses it so writes always stay in the injected space, even if
+                // the user switches the global setting mid-session.
+                sessionContainerRef.set(session.id, active);
                 let profileText = '';
                 if (active) {
                     try {

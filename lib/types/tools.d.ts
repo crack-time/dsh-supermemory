@@ -1,8 +1,8 @@
 /**
  * AI-facing memory tools registered into the dsh tool runtime. Host-side calls
  * with the configured Bearer key — the model never sees credentials and
- * nothing crosses the browser origin. All container switching goes through
- * the shared setActiveContainer / discoverContainers helpers.
+ * nothing crosses the browser origin. Container discovery shares
+ * discoverContainers (the settings card is the single switch path).
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';

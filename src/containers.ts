@@ -1,8 +1,8 @@
 /**
- * Memory-container concerns: discovery (which container tags exist), profile
- * retrieval (static + dynamic facts) and the shared switch path. Used by the
- * settings-card API (GET /containers, POST /config), the list/select memory
- * tools and the session/created injection hook.
+ * Memory-container concerns: discovery (which container tags exist) and
+ * profile retrieval (static + dynamic facts). Used by the settings-card API
+ * (GET /containers, POST /config), the memory tools and the session/created
+ * injection hook.
  *
  * The authoritative source of truth for tags is /v3/documents/list WITHOUT a
  * containerTag filter (it returns every document's `containerTags` array);

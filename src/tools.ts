@@ -1,14 +1,14 @@
 /**
  * AI-facing memory tools registered into the dsh tool runtime. Host-side calls
  * with the configured Bearer key — the model never sees credentials and
- * nothing crosses the browser origin. All container switching goes through
- * the shared setActiveContainer / discoverContainers helpers.
+ * nothing crosses the browser origin. Container discovery shares
+ * discoverContainers (the settings card is the single switch path).
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
-import { activeContainer, argString, requireUpstream, setActiveContainer } from './config.ts';
-import { discoverContainers, fetchProfile, profileCounts } from './containers.ts';
+import { activeContainer, argString, requireUpstream } from './config.ts';
+import { discoverContainers } from './containers.ts';
 
 /**
  * supersonic semantic search tool: model-facing recall over the local
@@ -423,80 +423,6 @@ function makeDeleteDocumentTool(scope: SettingsScope<any>): ToolDefinition {
 }
 
 /**
- * Select-memory tool: switches the active memory container. The normal flow is
- * the user picking a container in the Supermemory settings card (dropdown);
- * this tool exists for the model-driven path (e.g. user says "use space X").
- */
-function makeSelectMemoryTool(scope: SettingsScope<any>, ctx: Context): ToolDefinition {
-    return {
-        name: 'supermemory_select_memory',
-        description:
-            'Switch the active memory space for this session. Use it when the user explicitly asks ' +
-            'to use a different memory space (otherwise the active space is managed in dsh Settings → ' +
-            'Supermemory). It saves the choice, fetches the profile for that container, and injects ' +
-            'the memory context into the session.',
-        parameters: {
-            type: 'object',
-            properties: {
-                containerTag: {
-                    type: 'string',
-                    description: 'The container tag the user selected or created. Must be ASCII-only (alphanumeric, hyphens, underscores, colons). No spaces or CJK characters.',
-                },
-            },
-            required: ['containerTag'],
-        },
-        output: {
-            schema: {
-                type: 'object',
-                properties: {
-                    containerTag: { type: 'string' },
-                    profileInjected: { type: 'boolean' },
-                    staticCount: { type: 'number' },
-                    dynamicCount: { type: 'number' },
-                    summary: { type: 'string' },
-                },
-                required: ['containerTag', 'profileInjected', 'summary'],
-                additionalProperties: false,
-            },
-            render: (_args, value) => {
-                const v = value as { summary?: string; staticCount?: number; dynamicCount?: number };
-                const sc = v.staticCount ?? 0;
-                const dc = v.dynamicCount ?? 0;
-                return [{ type: 'text', text: 'Memory loaded (' + sc + ' long-term + ' + dc + ' recent)' }];
-            },
-        },
-        execute: async (args) => {
-            const a = (args ?? {}) as { containerTag?: unknown };
-            const tag = argString(a.containerTag, '');
-            if (!tag) throw new Error('supermemory_select_memory: containerTag (non-empty string) is required');
-
-            // Shared write path: same function the settings card uses.
-            await setActiveContainer(scope, tag);
-
-            // Fetch the profile for the selected container and include it in the result.
-            let profileText = '';
-            let staticCount = 0;
-            let dynamicCount = 0;
-            try {
-                profileText = await fetchProfile(scope, tag);
-                const { base, apiKey } = requireUpstream(scope);
-                const counts = await profileCounts(base, apiKey, tag);
-                staticCount = counts.staticCount;
-                dynamicCount = counts.dynamicCount;
-            } catch {
-                // Profile fetch failed — not fatal.
-            }
-
-            const summary = profileText
-                ? 'Memory space "' + tag + '" selected and loaded. Below is the memory context for this session:\n\n' + profileText
-                : 'Memory space "' + tag + '" selected. No existing memories found in this space yet. You can now answer the user\'s questions.';
-            return { containerTag: tag, profileInjected: true, staticCount, dynamicCount, summary };
-        },
-        timeoutMs: 15000,
-    };
-}
-
-/**
  * List-containers tool: show all memory spaces with their fact counts.
  */
 function makeListContainersTool(scope: SettingsScope<any>): ToolDefinition {
@@ -638,7 +564,6 @@ export function registerMemoryTools(ctx: Context, scope: SettingsScope<any>): Ar
         ctx.tools.register(makeSaveTool(scope)),
         ctx.tools.register(makeForgetTool(scope)),
         ctx.tools.register(makeDeleteDocumentTool(scope)),
-        ctx.tools.register(makeSelectMemoryTool(scope, ctx)),
         ctx.tools.register(makeListContainersTool(scope)),
         ctx.tools.register(makeListDocumentsTool(scope)),
     ];

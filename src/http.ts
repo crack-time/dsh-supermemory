@@ -163,8 +163,8 @@ export async function handleApi(
             return sendJson(res, 200, resolveConfig(scope));
         }
         if (method === 'PUT' && pathname === API_PREFIX + '/active-container') {
-            // Dedicated, validated switch path used by the settings card and the
-            // select-memory tool — keeps container switching in one function.
+            // Dedicated, validated switch path used by the settings card —
+            // keeps container switching in one function.
             const body = JSON.parse((await readBody(req)) || '{}') as { containerTag?: unknown };
             const tag = typeof body.containerTag === 'string' ? body.containerTag.trim() : '';
             if (!tag) return sendJson(res, 400, { error: 'containerTag (non-empty string) required' });
