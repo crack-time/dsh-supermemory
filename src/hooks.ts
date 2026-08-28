@@ -167,6 +167,11 @@ export function getSessionContainer(sessionId: string): string | undefined {
     return sessionContainerRef.get(sessionId);
 }
 
+/** Override the session's container snapshot (used by the input-bar selector). */
+export function setSessionContainer(sessionId: string, tag: string): void {
+    sessionContainerRef.set(sessionId, tag);
+}
+
 /**
  * Cached profile text per session, populated asynchronously in session/created
  * and read synchronously by the systemPrompt.context() text function.

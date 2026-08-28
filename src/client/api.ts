@@ -13,6 +13,6 @@ export const API_URLS = {
     health: API_BASE + '/health',
     containers: API_BASE + '/containers',
     activeContainer: API_BASE + '/active-container',
-    /** Per-session container: GET /api/session/:id/container */
+    /** Per-session container: GET/PUT /api/session/:id/container */
     sessionContainer: (sessionId: string) => API_BASE + '/session/' + encodeURIComponent(sessionId) + '/container',
 } as const;

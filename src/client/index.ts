@@ -11,6 +11,7 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
 import { SupermemorySettingsCard } from './card.tsx';
 import { MemorySpaceBadge } from './header-badge.tsx';
+import { MemorySelector } from './memory-selector.tsx';
 import { CARD_LOCALE } from './card-locale.ts';
 import { injectCardCss } from './card-css.ts';
 import { API_URLS } from './api.ts';
@@ -35,6 +36,11 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
         };
         /** Badge chip in the session header (next to the agent-preset label). */
         'conversation.session.header.actions': {
+            kind: 'list';
+            scope: 'session';
+        };
+        /** Memory selector in the input bar (next to model selector). */
+        'conversation.input.right': {
             kind: 'list';
             scope: 'session';
         };
@@ -82,6 +88,22 @@ export function apply(ctx: ClientContext) {
                 sessionId,
             }),
         }, MemorySpaceBadge);
+    });
+
+    // ── Input bar memory selector ─────────────────────────────────────
+    // Registers a compact dropdown next to the model selector so users
+    // can switch the active memory container without opening settings.
+    slots?.inject?.('conversation.input.right', function* () {
+        yield slots.register({
+            name: 'conversation.input.right',
+            id: 'supermemory-selector',
+            order: 50,
+            locale: DICT,
+            inject: (sessionId: string) => ({
+                hooks: {},
+                sessionId,
+            }),
+        }, MemorySelector);
     });
 
     // ── Settings dialog card ──────────────────────────────────────────

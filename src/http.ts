@@ -13,7 +13,7 @@ import {
     setActiveContainer,
     activeContainer,
 } from './config.ts';
-import { getSessionContainer } from './hooks.ts';
+import { getSessionContainer, setSessionContainer } from './hooks.ts';
 import { discoverContainers } from './containers.ts';
 import type { ManagedServer } from './managed-server.ts';
 
@@ -200,6 +200,21 @@ export async function handleApi(
                 pathname.length - '/container'.length,
             );
             const tag = getSessionContainer(sid) ?? activeContainer(scope);
+            return sendJson(res, 200, { containerTag: tag });
+        }
+        // Per-session container switch: updates the session snapshot so this
+        // session's injection + persistence stay bound to the chosen space.
+        const sessionContainerPut = method === 'PUT' && pathname.startsWith(API_PREFIX + '/session/')
+            && pathname.endsWith('/container');
+        if (sessionContainerPut) {
+            const sid = pathname.slice(
+                (API_PREFIX + '/session/').length,
+                pathname.length - '/container'.length,
+            );
+            const body = JSON.parse((await readBody(req)) || '{}') as { containerTag?: unknown };
+            const tag = typeof body.containerTag === 'string' ? body.containerTag.trim() : '';
+            if (!tag) return sendJson(res, 400, { error: 'containerTag (non-empty string) required' });
+            setSessionContainer(sid, tag);
             return sendJson(res, 200, { containerTag: tag });
         }
         if (method === 'PUT' && pathname === API_PREFIX + '/active-container') {

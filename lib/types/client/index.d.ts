@@ -35,6 +35,11 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
             kind: 'list';
             scope: 'session';
         };
+        /** Memory selector in the input bar (next to model selector). */
+        'conversation.input.right': {
+            kind: 'list';
+            scope: 'session';
+        };
     }
     interface LocaleNamespaceMap {
         /** Card copy namespace (keys in card-locale.ts). */
