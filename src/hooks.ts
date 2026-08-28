@@ -318,8 +318,17 @@ function shellName(ctx: Context): string {
 }
 
 /**
+ * Best-effort Python environment description: uv is the package manager on
+ * this machine (C:\Users\crack\.local\bin\uv.exe, uv 0.11.26); report it so
+ * the model knows Python tooling should go through uv (uv run / uvx).
+ */
+function pythonEnv(): string {
+    return 'uv (C:\\Users\\crack\\.local\\bin\\uv.exe)';
+}
+
+/**
  * Dynamic environment block (top of the runtime context). Modeled after
- * Cursor's environment header: cwd, git state, platform, shell, OS.
+ * Cursor's environment header: cwd, git state, platform, shell, OS, python.
  * Order 5 keeps it ABOVE every framework context (110+).
  */
 function environmentBlock(ctx: Context, session: Session): string {
@@ -330,6 +339,7 @@ function environmentBlock(ctx: Context, session: Session): string {
         'Platform:                 ' + process.platform,
         'Shell:                    ' + shellName(ctx),
         'OS Version:               ' + process.platform + ' ' + osRelease(),
+        'Python:                   ' + pythonEnv(),
     ].join('\n');
 }
 
