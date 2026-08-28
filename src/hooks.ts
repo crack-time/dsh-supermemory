@@ -1,13 +1,13 @@
 /**
  * Deterministic session hooks:
- *  - session/created → inject the ACTIVE container's memory profile (retry
- *    while the managed upstream is still booting on a fresh dsh web start).
+ *  - session/created → snapshot the container + fetch profile into cache;
+ *    the systemPrompt.context() registration reads the cache synchronously
+ *    on every model step, so no agent.inject() is needed.
  *  - turn/end → persist each finished turn as one supermemory document
  *    (low-value turns filtered out first). Subagent sessions are skipped
  *    for both hooks.
  */
 import type { Context } from '@deepseek-ai/cordis';
-import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import type { Session } from '@deepseek-ai/dsh-session';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
 import { activeContainer, requireUpstream } from './config.ts';
@@ -148,39 +148,55 @@ function isTurnLowValue(transcript: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Context injection
+// Context injection via systemPrompt.context()
 // ---------------------------------------------------------------------------
-
-/** Inject recall context into the session's agent as a synthetic user message. */
-function injectContext(ctx: Context, session: Session, text: string): void {
-    const agent = ctx.agents.get(session.id);
-    if (!agent) return;
-    try {
-        agent.inject(createUserMessage({
-            content: [{ type: 'text', text: '[Memory Context (from local supermemory)]\n\n' + text }],
-            source: { kind: 'plugin', plugin: '@crack/dsh-supermemory', form: 'recall' },
-        }));
-    }
-    catch (error) {
-        ctx.logger.warn('supermemory context inject:', error);
-    }
-}
-
-/** Sessions that already received a profile injection (one per session). */
-const injectedSessions = new Set<string>();
 
 /**
  * Per-session container snapshot, taken at session/created and used by
- * turn/end persistence — so injection and writes stay bound to the SAME
- * space even if the user switches the global activeContainer mid-session
- * (the switch only affects NEW sessions). Missing entry falls back to the
- * live global setting (legacy sessions created before this snapshot).
+ * turn/end persistence + context rendering — so injection and writes stay
+ * bound to the SAME space even if the user switches the global setting
+ * mid-session. Missing entry falls back to the live global setting.
  */
 const sessionContainerRef = new Map<string, string>();
 
 /** Look up the container a session was bound to at creation time. */
 export function getSessionContainer(sessionId: string): string | undefined {
     return sessionContainerRef.get(sessionId);
+}
+
+/**
+ * Cached profile text per session, populated asynchronously in session/created
+ * and read synchronously by the systemPrompt.context() text function.
+ */
+const sessionProfileCache = new Map<string, string>();
+
+/**
+ * Scan session events for an existing supermemory injection (survives host
+ * restart / compaction). Returns the container tag embedded in the injection
+ * text, or undefined if no prior injection exists.
+ */
+function recoverInjectedContainer(session: Session): string | undefined {
+    const events = session.events;
+    for (let i = 0; i < events.length; i += 1) {
+        const e = events[i];
+        if (!e) continue;
+        if ((e.type as string) !== 'agent/inbox/spliced') continue;
+        const inserted = (e.data as { inserted?: Array<{ source?: { plugin?: string }; content?: readonly unknown[] }> }).inserted;
+        if (!Array.isArray(inserted)) continue;
+        for (const msg of inserted) {
+            if (msg.source?.plugin !== '@crack/dsh-supermemory') continue;
+            const blocks = msg.content ?? [];
+            for (const block of blocks) {
+                const b = block as { type?: string; text?: string };
+                if (typeof b.text === 'string') {
+                    const match = b.text.match(/Active memory space: (\S+)/);
+                    if (match) return match[1];
+                }
+            }
+            return undefined;
+        }
+    }
+    return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -235,8 +251,7 @@ async function persistTurn(
             .replace(/[^A-Za-z0-9_.-]/g, '-')
             .slice(0, 100);
         const workspace = await workspaceOf(ctx, session);
-        // Container binding: session snapshot wins (taken at session/created);
-        // fall back to the live setting for legacy sessions without one.
+        // Container binding: session snapshot wins; fall back to live setting.
         const containerTag = sessionContainerRef.get(session.id) ?? activeContainer(scope);
         const res = await fetch(base + '/v3/documents', {
             method: 'POST',
@@ -277,32 +292,59 @@ function isSubagent(session: Session): boolean {
 // Registration
 // ---------------------------------------------------------------------------
 
-/** Register the session/created injection and per-turn persistence. */
+/** Register the systemPrompt.context() + session hooks. */
 export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): Array<() => void> {
     const disposers: Array<() => void> = [];
 
+    // ── Dynamic context via systemPrompt ────────────────────────────────
+    // Registered once per scoped session; the text function runs synchronously
+    // on every model step, reading from the profile cache populated in
+    // session/created. This replaces the old agent.inject() approach:
+    // no duplicate tokens on restart/compaction, no injectedSessions Set.
+    ctx.inject(['systemPrompt'], (scopedCtx) => {
+        disposers.push(scopedCtx.systemPrompt.context({
+            name: 'supermemory:recall',
+            order: 50,
+            text: (context: { agent?: { session?: Session } }) => {
+                const session = context.agent?.session;
+                if (!session || isSubagent(session)) return '';
+                const container = sessionContainerRef.get(session.id) ?? activeContainer(scope);
+                const profile = sessionProfileCache.get(session.id);
+                if (!profile) return '';
+                return '[Memory Context (from local supermemory)]\n\n' +
+                    'Active memory space: ' + container + '\n\n' +
+                    profile +
+                    '\n\n[SYSTEM INSTRUCTION] Memory queries default to the active memory space above.';
+            },
+        }));
+    });
+
     // Release per-session state when a session leaves the store.
     disposers.push(ctx.on('session/disposed', (session) => {
-        injectedSessions.delete(session.id);
         sessionContainerRef.delete(session.id);
+        sessionProfileCache.delete(session.id);
         sessionWorkspaceRef.delete(session.id);
         workspaceResolving.delete(session.id);
     }));
 
+    // ── Session init: snapshot container + fetch profile into cache ─────
     disposers.push(ctx.on('session/created', (session) => {
         if (isSubagent(session)) return;
-        if (injectedSessions.has(session.id)) return;
-        injectedSessions.add(session.id);
         void (async () => {
             try {
-                const active = activeContainer(scope);
-                // Snapshot the container for THIS session: turn/end persistence
-                // uses it so writes always stay in the injected space, even if
-                // the user switches the global setting mid-session.
-                sessionContainerRef.set(session.id, active);
-                // Fetch the ACTIVE container's profile only — the container was
-                // chosen by the user in the settings card, so no container list
-                // is needed (and no full document scan).
+                // Container priority: session snapshot (from prior injection
+                // event) > global setting. Keeps the session bound to its
+                // original container across restarts and compactions.
+                const recovered = recoverInjectedContainer(session);
+                const active = recovered ?? activeContainer(scope);
+                if (recovered) {
+                    ctx.logger.debug('supermemory: recovered container "' + recovered + '" for session ' + session.id);
+                }
+                // Only set if no snapshot exists yet — never overwrite.
+                if (!sessionContainerRef.has(session.id)) {
+                    sessionContainerRef.set(session.id, active);
+                }
+                // Fetch profile and store in cache for the context text function.
                 let profileText = '';
                 for (let attempt = 0; attempt < 3; attempt += 1) {
                     try {
@@ -312,31 +354,23 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
                     catch { /* upstream may still be booting */ }
                     await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
                 }
-                // injectContext already prepends the '[Memory Context ...]' header;
-                // keep 'Active memory space' FIRST so the model always knows the
-                // bound space before reading any facts.
-                const guidance =
-                    'Active memory space: ' + active + '\n\n' +
-                    (profileText ? profileText : '') +
-                    (profileText ? '\n\n' : '') +
-                    '[SYSTEM INSTRUCTION] Memory queries default to the active memory space above.';
-                injectContext(ctx, session, guidance);
+                if (profileText) {
+                    sessionProfileCache.set(session.id, profileText);
+                }
             } catch (error) {
                 ctx.logger.warn('supermemory session init:', error);
             }
         })();
     }));
 
+    // ── Turn persistence ────────────────────────────────────────────────
     disposers.push(ctx.on('session/event', (session, event) => {
-        if (event.type !== 'turn/end') return;
         if (isSubagent(session)) return;
+        if (event.type !== 'turn/end') return;
         const turn = (event.data as { turn: number }).turn;
         const transcript = turnTranscript(session, turn);
         if (!transcript) return;
-        // Strict low-value gate: skip persisting bare acknowledgments /
-        // single-character choices / commands ("确认", "A", "do it", ...).
         if (isTurnLowValue(transcript)) return;
-        // One document per finished turn (fire-and-forget).
         void persistTurn(ctx, scope, session, turn, transcript);
     }));
 
