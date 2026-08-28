@@ -8,11 +8,6 @@ export interface CardState {
     openaiModel: string;
     activeContainer: string;
 }
-export interface ContainerInfo {
-    tag: string;
-    staticCount: number;
-    dynamicCount: number;
-}
 export interface ManagedStatus {
     enabled?: boolean;
     state?: string;
@@ -46,11 +41,6 @@ export declare function useSupermemoryCard(deps: CardHookDeps): {
     openaiApiKey: string;
     openaiBaseUrl: string;
     openaiModel: string;
-    activeContainer: string;
-    containers: ContainerInfo[];
-    containersLoading: boolean;
-    creatingContainer: boolean;
-    newContainerName: string;
     managed: ManagedStatus | null;
     server: CardState | null;
     saving: boolean;
@@ -68,11 +58,6 @@ export declare function useSupermemoryCard(deps: CardHookDeps): {
     setOpenaiApiKey: import("react").Dispatch<import("react").SetStateAction<string>>;
     setOpenaiBaseUrl: import("react").Dispatch<import("react").SetStateAction<string>>;
     setOpenaiModel: import("react").Dispatch<import("react").SetStateAction<string>>;
-    setActiveContainer: import("react").Dispatch<import("react").SetStateAction<string>>;
-    setContainers: import("react").Dispatch<import("react").SetStateAction<ContainerInfo[]>>;
-    setContainersLoading: import("react").Dispatch<import("react").SetStateAction<boolean>>;
-    setCreatingContainer: import("react").Dispatch<import("react").SetStateAction<boolean>>;
-    setNewContainerName: import("react").Dispatch<import("react").SetStateAction<string>>;
     setManaged: import("react").Dispatch<import("react").SetStateAction<ManagedStatus | null>>;
     setSaving: import("react").Dispatch<import("react").SetStateAction<boolean>>;
     setSaveFailed: import("react").Dispatch<import("react").SetStateAction<boolean>>;
@@ -81,8 +66,6 @@ export declare function useSupermemoryCard(deps: CardHookDeps): {
     setStatus: import("react").Dispatch<import("react").SetStateAction<Status | null>>;
     setLoadErr: import("react").Dispatch<import("react").SetStateAction<boolean>>;
     load: () => Promise<void>;
-    loadContainers: (force?: boolean) => Promise<void>;
-    saveContainer: (tag: string) => Promise<void>;
     commit: () => Promise<void>;
     runTest: () => Promise<void>;
 };

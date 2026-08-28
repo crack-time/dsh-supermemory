@@ -7,7 +7,7 @@
  * card-css.ts — the component stays focused on rendering.
  */
 import { type CardTextKey } from './card-locale.ts';
-export type { ContainerInfo, ManagedStatus, Status, CardState } from './card-state.ts';
+export type { ManagedStatus, Status, CardState } from './card-state.ts';
 /** Props consumed by the card component (translation + patch channel). */
 export interface CardProps {
     t?: (key: CardTextKey) => string;

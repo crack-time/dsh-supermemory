@@ -9,7 +9,7 @@
 import { CARD_LOCALE, type CardTextKey } from './card-locale.ts';
 import { useSupermemoryCard } from './card-state.ts';
 
-export type { ContainerInfo, ManagedStatus, Status, CardState } from './card-state.ts';
+export type { ManagedStatus, Status, CardState } from './card-state.ts';
 
 /** Props consumed by the card component (translation + patch channel). */
 export interface CardProps {

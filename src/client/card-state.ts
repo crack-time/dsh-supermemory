@@ -2,12 +2,12 @@
  * Settings-card state + business logic, extracted from card.tsx so the
  * component keeps only JSX and the hook stays testable on its own.
  *
- * The hook owns: config IO (load/save/commit), container discovery
- * (cache-aware), connection test, and every piece of field state the card
- * renders. It takes the translation function and the patch channel as
- * dependencies (injected by the slot host), mirroring CardProps.
+ * The hook owns: config IO (load/save/commit), connection test, and every
+ * piece of field state the card renders. It takes the translation function
+ * and the patch channel as dependencies (injected by the slot host),
+ * mirroring CardProps.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { API_URLS } from './api.ts';
 import type { CardTextKey } from './card-locale.ts';
 
@@ -19,12 +19,6 @@ export interface CardState {
     openaiBaseUrl: string;
     openaiModel: string;
     activeContainer: string;
-}
-
-export interface ContainerInfo {
-    tag: string;
-    staticCount: number;
-    dynamicCount: number;
 }
 
 export interface ManagedStatus {
@@ -50,7 +44,6 @@ export interface CardHookDeps {
     emptyServer?: CardState;
 }
 
-const CONTAINER_TTL_MS = 60_000;
 const DEFAULT_EMPTY: CardState = {
     baseUrl: '',
     apiKey: '',
@@ -73,11 +66,6 @@ export function useSupermemoryCard(deps: CardHookDeps) {
     const [openaiApiKey, setOpenaiApiKey] = useState('');
     const [openaiBaseUrl, setOpenaiBaseUrl] = useState('');
     const [openaiModel, setOpenaiModel] = useState('');
-    const [activeContainer, setActiveContainer] = useState('');
-    const [containers, setContainers] = useState<ContainerInfo[]>([]);
-    const [containersLoading, setContainersLoading] = useState(false);
-    const [creatingContainer, setCreatingContainer] = useState(false);
-    const [newContainerName, setNewContainerName] = useState('');
     const [managed, setManaged] = useState<ManagedStatus | null>(null);
     const [server, setServer] = useState<CardState | null>(null);
     const [saving, setSaving] = useState(false);
@@ -86,11 +74,6 @@ export function useSupermemoryCard(deps: CardHookDeps) {
     const [testing, setTesting] = useState(false);
     const [status, setStatus] = useState<Status | null>(null);
     const [loadErr, setLoadErr] = useState(false);
-    // Container-fetch cache: data is considered fresh for CONTAINER_TTL_MS.
-    // The in-flight guard is a ref (not state) so it is synchronous —
-    // near-simultaneous focus + click cannot both start a fetch.
-    const containersFetchedAtRef = useRef(0);
-    const containersInFlightRef = useRef(false);
 
     const dirty = server !== null &&
         (baseUrl.trim() !== server.baseUrl ||
@@ -98,8 +81,7 @@ export function useSupermemoryCard(deps: CardHookDeps) {
             serverPath.trim() !== server.serverPath ||
             openaiApiKey.trim() !== server.openaiApiKey ||
             openaiBaseUrl.trim() !== server.openaiBaseUrl ||
-            openaiModel.trim() !== server.openaiModel ||
-            activeContainer.trim() !== (server.activeContainer ?? '').trim());
+            openaiModel.trim() !== server.openaiModel);
 
     async function load() {
         setLoadErr(false);
@@ -114,7 +96,6 @@ export function useSupermemoryCard(deps: CardHookDeps) {
             setOpenaiApiKey(cfg.openaiApiKey ?? '');
             setOpenaiBaseUrl(cfg.openaiBaseUrl ?? '');
             setOpenaiModel(cfg.openaiModel ?? '');
-            setActiveContainer(cfg.activeContainer ?? '');
             setServer({
                 baseUrl: cfg.baseUrl ?? '',
                 apiKey: cfg.apiKey ?? '',
@@ -125,11 +106,10 @@ export function useSupermemoryCard(deps: CardHookDeps) {
                 activeContainer: cfg.activeContainer ?? '',
             });
             setStatus(null);
-            // Best-effort fetch of the managed-process status.
             fetch(API_URLS.health, { cache: 'no-store' })
                 .then((r) => r.json().catch(() => ({})))
                 .then((h) => h?.managed && setManaged(h.managed as ManagedStatus))
-                .catch(() => { /* status is optional */ });
+                .catch(() => {});
         }
         catch {
             setLoadErr(true);
@@ -142,69 +122,7 @@ export function useSupermemoryCard(deps: CardHookDeps) {
     useEffect(() => {
         if (!open) return;
         void load();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [open]);
-
-    // Declarative prefetch: once the API key is known, load the container list
-    // automatically (no manual event wiring needed for the initial load).
-    useEffect(() => {
-        if (!open) return;
-        if (!apiKey || !apiKey.trim()) return;
-        void loadContainers();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [open, apiKey]);
-
-    /**
-     * Fetch available containers from the upstream server (cache-aware).
-     * force: true always hits the network (used after creating a space);
-     * otherwise skips while a fetch is in flight or the last successful fetch
-     * is younger than CONTAINER_TTL_MS — reopening the dropdown is instant.
-     */
-    async function loadContainers(force = false) {
-        if (containersInFlightRef.current) return;
-        const isFresh = Date.now() - containersFetchedAtRef.current < CONTAINER_TTL_MS;
-        if (!force && isFresh) return;
-        containersInFlightRef.current = true;
-        setContainersLoading(true);
-        try {
-            const res = await fetch(API_URLS.containers, { cache: 'no-store' });
-            if (!res.ok) { setContainers([]); return; }
-            const data = await res.json() as { containers?: Array<{ tag: string; staticCount?: number; dynamicCount?: number }> };
-            const list = (data.containers ?? []).map((c) => ({
-                tag: c.tag,
-                staticCount: c.staticCount ?? 0,
-                dynamicCount: c.dynamicCount ?? 0,
-            }));
-            setContainers(list);
-            // Mark fresh only on a successful, non-empty response.
-            if (list.length > 0) containersFetchedAtRef.current = Date.now();
-            // If activeContainer is empty, auto-select the first one.
-            if (!activeContainer.trim() && list.length > 0) {
-                const first = list[0]!.tag;
-                setActiveContainer(first);
-                setServer((prev) => prev ? { ...prev, activeContainer: first } : prev);
-            }
-        } catch {
-            // Upstream unreachable — show an empty list rather than stale data.
-            setContainers([]);
-        } finally {
-            containersInFlightRef.current = false;
-            setContainersLoading(false);
-        }
-    }
-
-    /** Save only the activeContainer field (dedicated switch endpoint). */
-    async function saveContainer(tag: string) {
-        setActiveContainer(tag);
-        setServer((prev) => prev ? { ...prev, activeContainer: tag } : prev);
-        try {
-            await fetch(API_URLS.activeContainer, {
-                method: 'PUT',
-                headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({ containerTag: tag }),
-            });
-        } catch { /* best-effort: already updated locally; server learns on next settings save */ }
-    }
 
     async function commit() {
         const patch: Record<string, unknown> = {};
@@ -214,7 +132,6 @@ export function useSupermemoryCard(deps: CardHookDeps) {
         if (openaiApiKey.trim() !== (server?.openaiApiKey ?? '')) patch.openaiApiKey = openaiApiKey.trim();
         if (openaiBaseUrl.trim() !== (server?.openaiBaseUrl ?? '')) patch.openaiBaseUrl = openaiBaseUrl.trim();
         if (openaiModel.trim() !== (server?.openaiModel ?? '')) patch.openaiModel = openaiModel.trim();
-        if (activeContainer.trim() !== ((server?.activeContainer ?? '').trim())) patch.activeContainer = activeContainer.trim();
         if (Object.keys(patch).length === 0) return;
         setSaving(true);
         setSaveFailed(false);
@@ -243,11 +160,10 @@ export function useSupermemoryCard(deps: CardHookDeps) {
                 }));
                 setJustSaved(true);
                 setStatus({ kind: 'ok', text: t('saved') });
-                // Config save reconciles the managed process — refresh its status.
                 fetch(API_URLS.health, { cache: 'no-store' })
                     .then((r) => r.json().catch(() => ({})))
                     .then((h) => h?.managed && setManaged(h.managed as ManagedStatus))
-                    .catch(() => { /* optional */ });
+                    .catch(() => {});
             }
         }
         catch {
@@ -304,18 +220,13 @@ export function useSupermemoryCard(deps: CardHookDeps) {
     };
 
     return {
-        // state
         open, loading, baseUrl, apiKey, serverPath, openaiApiKey, openaiBaseUrl,
-        openaiModel, activeContainer, containers, containersLoading,
-        creatingContainer, newContainerName, managed, server,
+        openaiModel, managed, server,
         saving, saveFailed, justSaved, testing, status, loadErr,
         dirty, mgtText,
-        // actions
         setOpen, setBaseUrl, setApiKey, setServerPath, setOpenaiApiKey,
-        setOpenaiBaseUrl, setOpenaiModel, setActiveContainer,
-        setContainers, setContainersLoading, setCreatingContainer,
-        setNewContainerName, setManaged, setSaving, setSaveFailed,
+        setOpenaiBaseUrl, setOpenaiModel, setManaged, setSaving, setSaveFailed,
         setJustSaved, setTesting, setStatus, setLoadErr,
-        load, loadContainers, saveContainer, commit, runTest,
+        load, commit, runTest,
     };
 }
