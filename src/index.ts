@@ -11,7 +11,7 @@
  *   managed-server.ts  managed local supermemory server process
  *   http.ts            proxy + health + /api routes
  *   containers.ts      container discovery + profile fetch
- *   tools.ts           7 memory tools
+ *   tools/              memory tools (search, crud, list + barrel index)
  *   hooks.ts           systemPrompt.context() registration + turn persistence
  */
 // Type-only imports: they only load the declaration merging into the cordis
@@ -24,7 +24,7 @@ import type {} from '@deepseek-ai/dsh-workspace';
 import { registerSupermemorySettings } from './config.ts';
 import { ManagedServer } from './managed-server.ts';
 import { handleApi, API_PREFIX } from './http.ts';
-import { registerMemoryTools } from './tools.ts';
+import { registerMemoryTools } from './tools/index.ts';
 import { registerSessionHooks } from './hooks.ts';
 
 /** Required services: the web route registry, the user-settings seam, the tool registry, and the agent factory (for context injection). */
