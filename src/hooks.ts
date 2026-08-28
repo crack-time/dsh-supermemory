@@ -7,6 +7,9 @@
  *    (low-value turns filtered out first). Subagent sessions are skipped
  *    for both hooks.
  */
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { release as osRelease } from 'node:os';
 import type { Context } from '@deepseek-ai/cordis';
 import type { Session } from '@deepseek-ai/dsh-session';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
@@ -282,6 +285,54 @@ async function persistTurn(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Dynamic environment context
+// ---------------------------------------------------------------------------
+
+/** True when the session cwd is inside a git working tree. */
+function isGitRepo(cwd: string): boolean {
+    try {
+        return existsSync(join(cwd, '.git'));
+    }
+    catch {
+        return false;
+    }
+}
+
+/**
+ * Detect the shell tool this DSH web host actually executes commands with.
+ * The active shell executor registers as `ctx.shell` (one per context);
+ * its constructor name tells us which implementation backs it:
+ * PwshLocalExecutor → pwsh, LocalBashExecutor → bash.
+ */
+function shellName(ctx: Context): string {
+    const shell = (ctx as { shell?: unknown }).shell;
+    if (shell) {
+        const impl = (shell as { constructor?: { name?: string } }).constructor?.name ?? '';
+        if (impl.includes('Pwsh')) return 'pwsh';
+        if (impl.includes('Bash')) return 'bash';
+        return impl;
+    }
+    if (process.env.SHELL?.includes('bash')) return 'Git Bash';
+    return process.platform === 'win32' ? 'cmd.exe' : 'sh';
+}
+
+/**
+ * Dynamic environment block (top of the runtime context). Modeled after
+ * Cursor's environment header: cwd, git state, platform, shell, OS.
+ * Order 5 keeps it ABOVE every framework context (110+).
+ */
+function environmentBlock(ctx: Context, session: Session): string {
+    const cwd = session.header?.cwd ?? process.cwd();
+    return [
+        'Primary working directory: ' + cwd,
+        'Is a git repository:      ' + (isGitRepo(cwd) ? 'yes' : 'no'),
+        'Platform:                 ' + process.platform,
+        'Shell:                    ' + shellName(ctx),
+        'OS Version:               ' + process.platform + ' ' + osRelease(),
+    ].join('\n');
+}
+
 /** Skip subagent sessions for both hooks. */
 function isSubagent(session: Session): boolean {
     return session.header.origin === 'subagent'
@@ -302,9 +353,19 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
     // session/created. This replaces the old agent.inject() approach:
     // no duplicate tokens on restart/compaction, no injectedSessions Set.
     ctx.inject(['systemPrompt'], (scopedCtx) => {
+        // Dynamic environment block — first context the model reads (order 5).
+        disposers.push(scopedCtx.systemPrompt.context({
+            name: 'supermemory:environment',
+            order: 5,
+            text: (context: { agent?: { session?: Session } }) => {
+                const session = context.agent?.session;
+                if (!session || isSubagent(session)) return '';
+                return environmentBlock(ctx, session);
+            },
+        }));
         disposers.push(scopedCtx.systemPrompt.context({
             name: 'supermemory:recall',
-            order: 50,
+            order: 200,
             text: (context: { agent?: { session?: Session } }) => {
                 const session = context.agent?.session;
                 if (!session || isSubagent(session)) return '';

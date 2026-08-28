@@ -28,7 +28,7 @@ import { registerMemoryTools } from './tools.ts';
 import { registerSessionHooks } from './hooks.ts';
 
 /** Required services: the web route registry, the user-settings seam, the tool registry, and the agent factory (for context injection). */
-const inject = ['webServer', 'settings', 'tools', 'agents', 'workspaceRegistry', 'systemPrompt'];
+const inject = ['webServer', 'settings', 'tools', 'agents', 'workspaceRegistry', 'systemPrompt', 'shell'];
 
 function apply(ctx: Context): void {
     // "supermemory" settings namespace: dsh rc.7 renders it as a settings card
