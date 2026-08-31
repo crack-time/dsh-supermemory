@@ -33,18 +33,13 @@ const T = {
         fontSize: '13px',
         fontWeight: 500 as const,
         lineHeight: '20px',
+        fontFamily: 'var(--dsw-font-family)',
         display: 'inline-flex',
         whiteSpace: 'nowrap' as const,
         userSelect: 'none' as const,
     },
     triggerHover: {
         background: 'var(--dsw-alias-interactive-bg-hover)',
-    },
-    icon: {
-        width: '14px',
-        height: '14px',
-        flex: 'none',
-        opacity: 0.7,
     },
     chevron: {
         color: 'var(--dsw-alias-label-caption)',
@@ -74,6 +69,7 @@ const T = {
         bottom: 'calc(100% + 8px)',
         right: 0,
         overflowY: 'auto' as const,
+        fontFamily: 'var(--dsw-font-family)',
     },
     option: {
         display: 'flex',
@@ -85,6 +81,7 @@ const T = {
         cursor: 'pointer',
         borderRadius: '8px',
         color: 'var(--dsw-alias-label-primary)',
+        fontFamily: 'var(--dsw-font-family)',
     },
     optionSelected: {
         background: 'var(--dsw-alias-interactive-bg-hover)',
@@ -101,16 +98,6 @@ const T = {
         flex: 'none',
     },
 } as const;
-
-function MemoryIcon() {
-    return (
-        <svg style={T.icon} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-            <ellipse cx="8" cy="4" rx="5" ry="2" />
-            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4" />
-            <path d="M3 8c0 1.1 2.2 2 5 2s5-.9 5-2" />
-        </svg>
-    );
-}
 
 function ChevronDown({ open }: { open: boolean }) {
     return (
@@ -210,7 +197,6 @@ export function MemorySelector(props: any) {
                 onMouseLeave={() => setTriggerHover(false)}
                 title="Switch memory space"
             >
-                <MemoryIcon />
                 <span style={{ textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, overflow: 'hidden' }}>
                     {active || '—'}
                 </span>
