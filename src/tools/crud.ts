@@ -131,27 +131,37 @@ export function makeDeleteDocumentTool(scope: SettingsScope<any>): ToolDefinitio
     return {
         name: 'supermemory_delete_document',
         description:
-            'Delete supermemory documents (raw conversation-turn records) by EXPLICIT id(s) only. WARNING: deleting a document CASCADE-deletes the memories it produced. Whitelist-only: you must pass exact document ids; bulk-container deletion is intentionally disabled to prevent accidental loss. Always dryRun first (returns titles for review), then pass confirm:true with id(s) to actually delete.',
+            'Delete supermemory documents AND their produced memories. ' +
+            'Accepts either explicit document ids (ids) OR a session id (sessionId) to delete all documents from that session. ' +
+            'Always dryRun first to preview, then pass confirm:true to actually delete.',
         parameters: {
             type: 'object',
             properties: {
                 ids: {
                     type: 'array',
                     items: { type: 'string' },
-                    description: 'Exact document ids to delete (required, max 100 per call). Bulk-container deletion is disabled — you must list every id explicitly.',
+                    description: 'Document ids to delete (max 100). Provide either ids or sessionId, not both.',
+                },
+                sessionId: {
+                    type: 'string',
+                    description: 'Delete all documents and memories from this DSH session id (e.g. "session-3d6f0736-..."). Provide either ids or sessionId, not both.',
+                },
+                containerTag: {
+                    type: 'string',
+                    description: 'Optional: scope the search to a specific container when using sessionId.',
+                    default: '',
                 },
                 dryRun: {
                     type: 'boolean',
-                    description: 'When true, only preview which documents WOULD be deleted (returns titles for human review, no cascade).',
+                    description: 'When true, only preview which documents WOULD be deleted.',
                     default: true,
                 },
                 confirm: {
                     type: 'boolean',
-                    description: 'Required to actually delete. Must be true to perform the deletion (guards against accidental cascade memory loss).',
+                    description: 'Required to actually delete. Must be true to perform the deletion.',
                     default: false,
                 },
             },
-            required: ['ids'],
         },
         output: {
             schema: {
@@ -183,78 +193,173 @@ export function makeDeleteDocumentTool(scope: SettingsScope<any>): ToolDefinitio
             },
         },
         execute: async (args, exec) => {
-            const a = (args ?? {}) as { ids?: unknown; dryRun?: unknown; confirm?: unknown };
-            const ids = Array.isArray(a.ids)
+            const a = (args ?? {}) as { ids?: unknown; sessionId?: unknown; containerTag?: unknown; dryRun?: unknown; confirm?: unknown };
+            let docIds = Array.isArray(a.ids)
                 ? a.ids.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map((x) => x.trim())
                 : [];
-            // HARD GUARD: whitelist-only. Bulk-container deletion is disabled.
-            if (ids.length === 0) throw new Error('supermemory_delete_document: ids (non-empty array) is required — bulk-container deletion is disabled to prevent accidental loss. List exact document ids.');
-            if (ids.length > 100) throw new Error('supermemory_delete_document: at most 100 ids per call');
+            const sessionId = typeof a.sessionId === 'string' ? a.sessionId.trim() : '';
+            if (docIds.length === 0 && !sessionId) {
+                throw new Error('supermemory_delete_document: provide either ids (non-empty array) or sessionId (non-empty string).');
+            }
+            if (docIds.length > 0 && sessionId) {
+                throw new Error('supermemory_delete_document: provide either ids or sessionId, not both.');
+            }
+            if (docIds.length > 100) throw new Error('supermemory_delete_document: at most 100 ids per call');
             const dryRun = a.dryRun === true;
             const confirm = a.confirm === true;
             const { base, apiKey } = requireUpstream(scope);
+            const tag = argString(a.containerTag, activeContainer(scope));
 
-            // Build targets (id + resolved title from the list endpoint for review).
-            const targets: Array<{ id: string; title: string }> = [];
-            // List all documents (no containerTag filter) to resolve titles for any id.
-            const listRes = await fetch(base + '/v3/documents/list', {
-                method: 'POST',
-                headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
-                body: JSON.stringify({ limit: 1000 }),
-                signal: exec.signal,
-            });
-            if (listRes.ok) {
-                const listData = (await listRes.json()) as { memories?: Array<{ id: string; title?: string }> };
-                const known = new Map<string, string>((listData.memories ?? []).map((d) => [d.id, d.title ?? '']));
-                for (const id of ids) targets.push({ id, title: known.get(id) ?? '' });
-            } else {
-                for (const id of ids) targets.push({ id, title: '' });
+            // If sessionId provided, resolve it → document IDs by scanning v3 documents list.
+            if (sessionId && docIds.length === 0) {
+                const resolved: string[] = [];
+                let page = 1;
+                const MAX_PAGES = 20;
+                do {
+                    const res = await fetch(base + '/v3/documents/list', {
+                        method: 'POST',
+                        headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
+                        body: JSON.stringify({ limit: 200, page }),
+                        signal: exec.signal,
+                    });
+                    if (!res.ok) break;
+                    const data = (await res.json()) as {
+                        memories?: Array<{ id: string; metadata?: { sessionId?: string }; containerTags?: string[] }>;
+                        pagination?: { currentPage?: number; totalPages?: number };
+                    };
+                    for (const d of data.memories ?? []) {
+                        if (d.metadata?.sessionId === sessionId) {
+                            // If containerTag filter is set, respect it.
+                            if (tag && !(d.containerTags ?? []).includes(tag)) continue;
+                            resolved.push(d.id);
+                        }
+                    }
+                    const tp = data.pagination?.totalPages ?? 1;
+                    page = (data.pagination?.currentPage ?? page) + 1;
+                    if (page > tp) break;
+                } while (page <= MAX_PAGES);
+                docIds = resolved;
             }
 
+            // Step 1: Resolve document IDs → titles via /v3/documents/list
+            //         and document IDs → memory IDs via /v4/memories/list.
+            const docIdSet = new Set(docIds);
+            const titleMap = new Map<string, string>();
+            const docToMemIds = new Map<string, string[]>();
+
+            // Resolve titles from v3 documents list.
+            {
+                let page = 1;
+                const MAX_PAGES = 10;
+                do {
+                    const res = await fetch(base + '/v3/documents/list', {
+                        method: 'POST',
+                        headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
+                        body: JSON.stringify({ limit: 200, page }),
+                        signal: exec.signal,
+                    });
+                    if (!res.ok) break;
+                    const data = (await res.json()) as {
+                        memories?: Array<{ id: string; title?: string }>;
+                        pagination?: { currentPage?: number; totalPages?: number };
+                    };
+                    for (const d of data.memories ?? []) {
+                        if (docIdSet.has(d.id)) titleMap.set(d.id, (d.title ?? '').slice(0, 80));
+                    }
+                    const tp = data.pagination?.totalPages ?? 1;
+                    page = (data.pagination?.currentPage ?? page) + 1;
+                    if (page > tp) break;
+                } while (page <= MAX_PAGES);
+            }
+
+            // Resolve memory IDs from v4 memories list.
+            {
+                let page = 1;
+                const MAX_PAGES = 20;
+                do {
+                    const res = await fetch(base + '/v4/memories/list', {
+                        method: 'POST',
+                        headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
+                        body: JSON.stringify({ containerTags: [tag], limit: 100, page }),
+                        signal: exec.signal,
+                    });
+                    if (!res.ok) break;
+                    const data = (await res.json()) as {
+                        memoryEntries?: Array<{ id: string; memory?: string; documentIds?: string[] }>;
+                        pagination?: { currentPage?: number; totalPages?: number };
+                    };
+                    for (const e of data.memoryEntries ?? []) {
+                        for (const dId of e.documentIds ?? []) {
+                            if (docIdSet.has(dId)) {
+                                if (!docToMemIds.has(dId)) docToMemIds.set(dId, []);
+                                docToMemIds.get(dId)!.push(e.id);
+                                if (!titleMap.has(dId)) titleMap.set(dId, (e.memory ?? '').slice(0, 80));
+                            }
+                        }
+                    }
+                    const tp = data.pagination?.totalPages ?? 1;
+                    page = (data.pagination?.currentPage ?? page) + 1;
+                    if (page > tp) break;
+                } while (page <= MAX_PAGES);
+            }
+
+            const targets = docIds.map((id) => ({ id, title: titleMap.get(id) ?? '' }));
+
             if (dryRun) {
+                const memCount = [...docToMemIds.values()].reduce((s, arr) => s + arr.length, 0);
                 return {
                     dryRun: true,
                     deleted: 0,
-                    summary: 'Dry run: ' + targets.length + ' document(s) would be deleted (cascade-deleting their memories). Titles shown for review; pass confirm:true to actually delete.',
+                    summary: 'Dry run: ' + targets.length + ' document(s) found, linked to ' + memCount + ' memory entry(ies). Pass confirm:true to delete.',
                     documents: targets,
                 };
             }
 
             if (!confirm) {
-                throw new Error('supermemory_delete_document: confirm:true is required to actually delete — this CASCADE-deletes the documents produced memories. Re-check with dryRun first.');
+                throw new Error('supermemory_delete_document: confirm:true is required — this deletes both memories and documents. Re-check with dryRun first.');
             }
 
-            let deleted = 0;
-            for (let i = 0; i < ids.length; i += 100) {
-                const batch = ids.slice(i, i + 100);
-                const delRes = await fetch(base + '/v3/documents/bulk', {
+            // Step 2: Forget linked memories via /v4/memories/forget-matching.
+            const allMemIds: string[] = [];
+            for (const memIds of docToMemIds.values()) allMemIds.push(...memIds);
+            let memForgotten = 0;
+            for (let i = 0; i < allMemIds.length; i += 100) {
+                const batch = allMemIds.slice(i, i + 100);
+                const res = await fetch(base + '/v4/memories/forget-matching', {
+                    method: 'POST',
+                    headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
+                    body: JSON.stringify({ containerTag: tag, dryRun: false, threshold: 0, maxForget: batch.length, ids: batch }),
+                    signal: exec.signal,
+                });
+                if (res.ok) {
+                    const d = (await res.json()) as { count?: number };
+                    memForgotten += d.count ?? 0;
+                }
+            }
+
+            // Step 3: Delete v3 documents via /v3/documents/bulk DELETE with JSON body.
+            let docsDeleted = 0;
+            for (let i = 0; i < docIds.length; i += 100) {
+                const batch = docIds.slice(i, i + 100);
+                const res = await fetch(base + '/v3/documents/bulk', {
                     method: 'DELETE',
                     headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
                     body: JSON.stringify({ ids: batch }),
                     signal: exec.signal,
                 });
-                if (delRes.ok) {
-                    const d = (await delRes.json()) as { deleted?: number; deletedDocs?: number };
-                    deleted += d.deleted ?? d.deletedDocs ?? batch.length;
-                } else {
-                    for (const id of batch) {
-                        const singleRes = await fetch(base + '/v3/documents/' + id, {
-                            method: 'DELETE',
-                            headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
-                            signal: exec.signal,
-                        });
-                        if (singleRes.ok) deleted++;
-                    }
+                if (res.ok) {
+                    const d = (await res.json()) as { deletedCount?: number };
+                    docsDeleted += d.deletedCount ?? 0;
                 }
             }
 
             return {
                 dryRun: false,
-                deleted,
-                summary: 'Deleted ' + deleted + ' document(s) (and their produced memories).',
-                documents: targets.map((t) => ({ id: t.id, title: t.title })),
+                deleted: memForgotten + docsDeleted,
+                summary: 'Forgotten ' + memForgotten + ' memories, deleted ' + docsDeleted + ' documents (' + targets.length + ' document(s) targeted).',
+                documents: targets,
             };
         },
-        timeoutMs: 60000,
+        timeoutMs: 120000,
     };
 }

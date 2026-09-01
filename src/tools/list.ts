@@ -69,7 +69,7 @@ export function makeListContainersTool(scope: SettingsScope<any>): ToolDefinitio
 export function makeListDocumentsTool(scope: SettingsScope<any>): ToolDefinition {
     return {
         name: 'supermemory_list_documents',
-        description: 'List documents stored in a specific memory space (container tag). Returns document ids, titles, and metadata. Paginates over ALL pages server-side so total is the container\'s real document count (the upstream list endpoint ignores the container filter, so filtering happens here). Use this to review what is stored before deleting or managing documents.',
+        description: 'List documents stored in a specific memory space (container tag). Returns document ids, titles, and metadata. Paginates over ALL pages server-side so total is the container\'s real document count (the upstream list endpoint ignores the container filter, so filtering happens here). Use this to review what is stored before deleting or managing documents. Use offset to page through large result sets.',
         parameters: {
             type: 'object',
             properties: {
@@ -83,6 +83,11 @@ export function makeListDocumentsTool(scope: SettingsScope<any>): ToolDefinition
                     description: 'Page size for the upstream pagination (1-1100). This is a per-page cap, not a total cap — the tool pages through everything.',
                     default: 100,
                 },
+                offset: {
+                    type: 'number',
+                    description: 'Number of documents to skip from the start. Use for pagination when the total exceeds the display limit.',
+                    default: 0,
+                },
             },
         },
         output: {
@@ -91,6 +96,7 @@ export function makeListDocumentsTool(scope: SettingsScope<any>): ToolDefinition
                 properties: {
                     containerTag: { type: 'string' },
                     total: { type: 'number' },
+                    offset: { type: 'number' },
                     documents: {
                         type: 'array',
                         items: {
@@ -105,23 +111,30 @@ export function makeListDocumentsTool(scope: SettingsScope<any>): ToolDefinition
                         },
                     },
                 },
-                required: ['containerTag', 'total', 'documents'],
+                required: ['containerTag', 'total', 'offset', 'documents'],
                 additionalProperties: false,
             },
             render: (_args, value) => {
-                const v = value as { containerTag?: string; total?: number; documents?: Array<{ id: string; title?: string }> };
-                const lines = (v.documents ?? []).slice(0, 20).map((d, i) => {
+                const v = value as { containerTag?: string; total?: number; offset?: number; documents?: Array<{ id: string; title?: string }> };
+                const offset = v.offset ?? 0;
+                const docs = v.documents ?? [];
+                const lines = docs.map((d, i) => {
                     const t = (d.title || '').replace(/\n/g, ' ').slice(0, 80);
-                    return (i + 1) + '. [' + d.id.slice(0, 10) + '] ' + t;
+                    return (offset + i + 1) + '. [' + d.id + '] ' + t;
                 });
-                const more = (v.total ?? 0) > 20 ? '\n... and ' + ((v.total ?? 0) - 20) + ' more' : '';
-                return [{ type: 'text', text: 'Documents in "' + v.containerTag + '" (' + v.total + '):\n' + lines.join('\n') + more }];
+                const end = offset + docs.length;
+                const total = v.total ?? 0;
+                const hasMore = end < total;
+                const rangeInfo = '[' + (offset + 1) + '-' + end + ' of ' + total + ']';
+                const hint = hasMore ? '\nUse offset=' + end + ' to see more.' : '';
+                return [{ type: 'text', text: 'Documents in "' + v.containerTag + '" ' + rangeInfo + ':\n' + lines.join('\n') + hint }];
             },
         },
         execute: async (args) => {
-            const a = (args ?? {}) as { containerTag?: unknown; limit?: unknown };
+            const a = (args ?? {}) as { containerTag?: unknown; limit?: unknown; offset?: unknown };
             const tag = argString(a.containerTag, activeContainer(scope));
             const rawLimit = typeof a.limit === 'number' ? a.limit : 100;
+            const offset = typeof a.offset === 'number' ? Math.max(0, Math.floor(a.offset)) : 0;
             // Upstream limit is capped at 1100 (server rejects anything larger).
             const limit = Math.min(1100, Math.max(1, Math.floor(rawLimit)));
             const { base, apiKey } = requireUpstream(scope);
@@ -159,7 +172,10 @@ export function makeListDocumentsTool(scope: SettingsScope<any>): ToolDefinition
                 page = (data.pagination?.currentPage ?? page) + 1;
             } while (page <= totalPages && page <= MAX_PAGES);
 
-            return { containerTag: tag, total: all.length, documents: all };
+            // Apply client-side offset/limit for the window view.
+            const windowDocs = all.slice(offset, offset + limit);
+
+            return { containerTag: tag, total: all.length, offset, documents: windowDocs };
         },
         timeoutMs: 60000,
     };

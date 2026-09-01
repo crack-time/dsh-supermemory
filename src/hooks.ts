@@ -38,6 +38,62 @@ export function setSessionContainer(sessionId: string, tag: string): void {
     sessionContainerRef.set(sessionId, tag);
 }
 
+// ---------------------------------------------------------------------------
+// Session-scoped document persistence
+//
+// One document per session, updated (PATCH) with the cumulative transcript on
+// every turn — instead of the old turn-per-document scheme that grew the
+// document count linearly with turns. Kept in-memory so the cumulative text
+// survives a miss and the "patching" flag serializes PATCHes (a PATCH issued
+// while a previous one is still processing is dropped upstream, so we never
+// run two at once; the full text is re-broadcast next time).
+// ---------------------------------------------------------------------------
+
+export interface SessionDocState {
+    /** Upstream document id for this session, once created. */
+    docId?: string;
+    /** Cumulative transcript text since session creation. */
+    fullText: string;
+    /** True while a PATCH is in flight — skip new turns until it settles. */
+    patching: boolean;
+}
+
+const sessionDocRef = new Map<string, SessionDocState>();
+
+function sessionDocState(sessionId: string): SessionDocState {
+    let entry = sessionDocRef.get(sessionId);
+    if (!entry) {
+        entry = { fullText: '', patching: false };
+        sessionDocRef.set(sessionId, entry);
+    }
+    return entry;
+}
+
+/** Poll GET /v3/documents/{id} until status === "done" or the timeout elapses. */
+async function waitDocumentDone(
+    base: string,
+    apiKey: string,
+    docId: string,
+    timeoutMs = 90000,
+): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+        try {
+            const res = await fetch(base + '/v3/documents/' + encodeURIComponent(docId), {
+                headers: { authorization: 'Bearer ' + apiKey },
+                signal: AbortSignal.timeout(15000),
+            });
+            if (res.ok) {
+                const data = (await res.json()) as { status?: string };
+                if (data.status === 'done' || data.status === 'failed') return;
+            }
+        }
+        catch { /* transient — keep polling */ }
+        if (Date.now() >= deadline) return;
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+    }
+}
+
 /**
  * Cached profile text per session, populated asynchronously in session/created
  * and read synchronously by the systemPrompt.context() text function.
@@ -112,7 +168,16 @@ async function workspaceOf(ctx: Context, session: Session): Promise<string | und
     }
 }
 
-/** Persist one finished turn as a supermemory document. */
+/**
+ * Upsert the cumulative session transcript into one session-scoped document.
+ *
+ * First call for a session creates the document (POST); subsequent calls
+ * PATCH the full cumulative text onto the same document, so the document
+ * count stays O(sessions), not O(turns). While a PATCH is still processing
+ * upstream this call bails early — the full text is already accumulated in
+ * `sessionDocRef` and will be re-broadcast on the next turn, so no content is
+ * lost even if an update is dropped.
+ */
 async function persistTurn(
     ctx: Context,
     scope: SettingsScope<any>,
@@ -120,39 +185,82 @@ async function persistTurn(
     turn: number,
     text: string,
 ): Promise<void> {
+    const entry = sessionDocState(session.id);
+    entry.fullText = entry.fullText
+        ? entry.fullText + '\n\n' + text
+        : text;
+
+    // Serialize PATCHes: an update sent while the previous one is still
+    // processing is ignored upstream, so never run two at once.
+    if (entry.patching) return;
+    entry.patching = true;
     try {
         const { base, apiKey } = requireUpstream(scope);
-        const customId = (session.id + '-turn-' + turn)
-            .replace(/[^A-Za-z0-9_.-]/g, '-')
-            .slice(0, 100);
         const workspace = await workspaceOf(ctx, session);
         const containerTag = sessionContainerRef.get(session.id) ?? activeContainer(scope);
-        const res = await fetch(base + '/v3/documents', {
-            method: 'POST',
-            headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
-            body: JSON.stringify({
-                content: text,
-                containerTag,
-                customId,
-                taskType: 'memory',
-                dreaming: 'dynamic',
-                documentDate: new Date().toISOString(),
-                metadata: {
-                    sessionId: session.id,
-                    turn: turn,
-                    ...(workspace ? { workspace } : {}),
-                },
-            }),
-            signal: AbortSignal.timeout(20000),
-        });
-        if (!res.ok) {
-            ctx.logger.warn(
-                'supermemory turn persist: HTTP ' + res.status + ' ' + (await res.text()).slice(0, 200),
-            );
+        const headers = { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' };
+        const meta: Record<string, unknown> = {
+            sessionId: session.id,
+            lastTurn: turn,
+            ...(workspace ? { workspace } : {}),
+        };
+
+        if (entry.docId) {
+            // Update existing session document with the cumulative transcript.
+            const res = await fetch(base + '/v3/documents/' + encodeURIComponent(entry.docId), {
+                method: 'PATCH',
+                headers,
+                body: JSON.stringify({
+                    content: entry.fullText,
+                    taskType: 'memory',
+                    documentDate: new Date().toISOString(),
+                }),
+                signal: AbortSignal.timeout(30000),
+            });
+            if (!res.ok) {
+                ctx.logger.warn(
+                    'supermemory turn PATCH: HTTP ' + res.status + ' ' + (await res.text()).slice(0, 200),
+                );
+                return;
+            }
+            await waitDocumentDone(base, apiKey, entry.docId);
+        }
+        else {
+            // First turn: create the session document.
+            const customId = session.id.replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 100);
+            const res = await fetch(base + '/v3/documents', {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({
+                    content: entry.fullText,
+                    containerTag,
+                    customId,
+                    taskType: 'memory',
+                    dreaming: 'dynamic',
+                    documentDate: new Date().toISOString(),
+                    metadata: meta,
+                }),
+                signal: AbortSignal.timeout(30000),
+            });
+            if (!res.ok) {
+                ctx.logger.warn(
+                    'supermemory session create: HTTP ' + res.status + ' ' + (await res.text()).slice(0, 200),
+                );
+                return;
+            }
+            const created = (await res.json()) as { id?: string; status?: string };
+            if (created.id) {
+                entry.docId = created.id;
+                ctx.logger.debug('supermemory session doc created id=' + created.id + ' session=' + session.id);
+                await waitDocumentDone(base, apiKey, created.id);
+            }
         }
     }
     catch (error) {
         ctx.logger.warn('supermemory turn persist:', error);
+    }
+    finally {
+        entry.patching = false;
     }
 }
 
@@ -205,6 +313,7 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
         sessionProfileCache.delete(session.id);
         sessionWorkspaceRef.delete(session.id);
         workspaceResolving.delete(session.id);
+        sessionDocRef.delete(session.id);
     }));
 
     // ── Session init: snapshot container + fetch profile into cache ─────
@@ -232,6 +341,10 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
                 if (profileText) {
                     sessionProfileCache.set(session.id, profileText);
                 }
+                // Pre-init the session document state so the first turn's PATCH
+                // logic has a stable entry (not strictly required, but keeps a
+                // single ownership path for sessionDocRef).
+                sessionDocState(session.id);
             } catch (error) {
                 ctx.logger.warn('supermemory session init:', error);
             }

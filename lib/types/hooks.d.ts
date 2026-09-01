@@ -13,5 +13,13 @@ import type { SettingsScope } from '@deepseek-ai/dsh-settings';
 export declare function getSessionContainer(sessionId: string): string | undefined;
 /** Override the session container snapshot (used by the input-bar selector). */
 export declare function setSessionContainer(sessionId: string, tag: string): void;
+export interface SessionDocState {
+    /** Upstream document id for this session, once created. */
+    docId?: string;
+    /** Cumulative transcript text since session creation. */
+    fullText: string;
+    /** True while a PATCH is in flight — skip new turns until it settles. */
+    patching: boolean;
+}
 /** Register the systemPrompt.context() + session hooks. */
 export declare function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): Array<() => void>;

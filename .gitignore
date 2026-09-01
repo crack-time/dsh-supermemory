@@ -17,3 +17,6 @@ node_modules/
 
 # 鏋勫缓涓棿浜х墿
 *.tsbuildinfo
+
+# 调试脚本/临时产物 (memory 审计)
+audit/
