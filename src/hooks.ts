@@ -3,9 +3,8 @@
  *  - session/created -> snapshot the container + fetch profile into cache;
  *    the systemPrompt.context() registration reads the cache synchronously
  *    on every model step, so no agent.inject() is needed.
- *  - turn/end -> persist each finished turn as one supermemory document
- *    (low-value turns filtered out first). Subagent sessions are skipped
- *    for both hooks.
+ *  - turn/end -> persist each finished turn as one supermemory document.
+ *    Subagent sessions are skipped for both hooks.
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { Session } from '@deepseek-ai/dsh-session';
@@ -13,7 +12,6 @@ import type { SettingsScope } from '@deepseek-ai/dsh-settings';
 import { activeContainer, requireUpstream } from './config.ts';
 import { fetchProfile } from './containers.ts';
 import { turnTranscript } from './transcript.ts';
-import { isTurnLowValue } from './low-value.ts';
 import { environmentBlock } from './environment.ts';
 
 // ---------------------------------------------------------------------------
@@ -133,8 +131,7 @@ function recoverInjectedContainer(session: Session): string | undefined {
 }
 
 // ---------------------------------------------------------------------------
-// Turn persistence — one document per finished turn (low-value turns are
-// filtered out before reaching this point).
+// Turn persistence — one document per finished turn.
 // ---------------------------------------------------------------------------
 
 /**
@@ -358,7 +355,6 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
         const turn = (event.data as { turn: number }).turn;
         const transcript = turnTranscript(session, turn);
         if (!transcript) return;
-        if (isTurnLowValue(transcript)) return;
         void persistTurn(ctx, scope, session, turn, transcript);
     }));
 
