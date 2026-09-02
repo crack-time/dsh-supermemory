@@ -13,7 +13,7 @@ import type { SettingsScope } from '@deepseek-ai/dsh-settings';
 import { activeContainer, requireUpstream } from './config.ts';
 import { fetchProfile } from './containers.ts';
 import { turnTranscript } from './transcript.ts';
-import { environmentBlock } from './environment.ts';
+import { environmentBlock, kickOffEnvironmentProbe } from './environment.ts';
 import { apiFetch } from './upstream.ts';
 
 // ---------------------------------------------------------------------------
@@ -310,6 +310,9 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
         if (isSubagent(session)) return;
         void (async () => {
             try {
+                // Kick off the async WSL environment probe (fire-and-forget)
+                // so the environment block can report the distro's shell/uv.
+                kickOffEnvironmentProbe(session);
                 const recovered = recoverInjectedContainer(session);
                 const active = recovered ?? activeContainer(scope);
                 if (recovered) {
