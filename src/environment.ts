@@ -31,6 +31,7 @@ import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { release as osRelease, homedir } from 'node:os';
 import { execFile as execFileCb } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { Context } from '@deepseek-ai/cordis';
 import type { Session } from '@deepseek-ai/dsh-session';
@@ -111,11 +112,15 @@ function probeWslFs(cwd: string): WslProbe {
     if (m?.[1]) probe.osName = m[1];
 
     for (const home of wslHomeCandidates(cwd)) {
-        for (const rel of ['.local\\bin\\uv', '.cargo\\bin\\uv', '.uv\\bin\\uv']) {
+        // uv: ~/.local, ~/.cargo, ~/.uv, and the linuxbrew home's .linuxbrew tree
+        // (brew installs land under /home/linuxbrew/.linuxbrew/bin).
+        for (const rel of ['.local\\bin\\uv', '.cargo\\bin\\uv', '.uv\\bin\\uv', '.linuxbrew\\bin\\uv']) {
             if (anyDir(`${home}\\${rel}`)) { probe.uv = uncToLinux(`${home}\\${rel}`); break; }
         }
         if (probe.uv) break;
-        if (anyDir(`${home}\\.local\\bin\\uvx`)) { probe.uvx = uncToLinux(`${home}\\.local\\bin\\uvx`); }
+        for (const rel of ['.local\\bin\\uvx', '.linuxbrew\\bin\\uvx']) {
+            if (anyDir(`${home}\\${rel}`)) { probe.uvx = uncToLinux(`${home}\\${rel}`); break; }
+        }
     }
     if (!probe.python && anyDir(`${prefix}\\usr\\bin\\python3`)) probe.python = '/usr/bin/python3';
     return probe;
@@ -158,6 +163,8 @@ const wslInFlight = new Map<string, Promise<WslProbe>>();
 /** Probes currently being attempted (for the "(probing…)" render hint). */
 const wslAttempting = new Set<string>();
 const wslAttempts = new Map<string, number>();
+/** Distros we already attempted a synchronous first-render probe for. */
+const wslSyncProbed = new Set<string>();
 
 // ---------------------------------------------------------------------------
 // Persistent cache: a successful probe is cheap to re-derive, but cold-booting
@@ -248,46 +255,95 @@ async function listDistros(): Promise<string[]> {
         .filter((line) => line.length > 0 && line !== '*');
 }
 
-/**
- * Probe one distro for its shell + toolchain. The bash one-liner first widens
- * PATH with every well-known tool directory (so a non-interactive shell — which
- * skips .bashrc's interactive guard — still finds brew/uv/cargo installs), then
- * reports uv/uvx/python by `command -v`, falling back to exists on those same
- * directories for uv if it isn't on PATH.
+/** The bash one-liner used to probe a distro.
+ *
+ * IMPORTANT: this runs via `wsl.exe -- bash -c '<cmd>'`, which is fiddly across
+ * the Windows→WSL argv boundary — do NOT source dotfiles, reference a variable
+ * whose value contains spaces (e.g. $PRETTY_NAME), or build multi-token values
+ * with `command -v`/PATH. Instead use the marker-line format: each `echo
+ * __KEY__` is followed by a plain value line (produced by `test -x … && echo
+ * …` / `command -v` / `grep` / `uname`), or an empty line. This survives intact.
  */
-async function probeWsl(distro: string): Promise<WslProbe> {
-    const script = [
-        ': "${HOME:=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)}"',
-        'printf "__USER__=%s\\n" "$(id -un 2>/dev/null)"',
-        'printf "__HOME__=%s\\n" "$HOME"',
-        'printf "__SHELL__=%s\\n" "${SHELL:-/bin/bash}"',
-        'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/home/linuxbrew/.linuxbrew/bin:$PATH"',
-        'u=$(command -v uv 2>/dev/null); [ -z "$u" ] && for p in "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv" "/home/linuxbrew/.linuxbrew/bin/uv"; do [ -x "$p" ] && u="$p" && break; done; printf "__UV__=%s\\n" "$u"',
-        'x=$(command -v uvx 2>/dev/null); [ -z "$x" ] && for p in "$HOME/.local/bin/uvx" "$HOME/.cargo/bin/uvx" "/home/linuxbrew/.linuxbrew/bin/uvx"; do [ -x "$p" ] && x="$p" && break; done; printf "__UVX__=%s\\n" "$x"',
-        'printf "__PY__=%s\\n" "$(command -v python3 2>/dev/null)"',
-        'printf "__PY2__=%s\\n" "$(command -v python 2>/dev/null)"',
-        '. /etc/os-release 2>/dev/null && printf "__OSNAME__=%s\\n" "${PRETTY_NAME:-unknown}"',
-        'printf "__KERNEL__=%s\\n" "$(uname -r 2>/dev/null)"',
-    ].join('\n');
+function probeScript(): string {
+    return [
+        'echo __UVX__', 'test -x /home/linuxbrew/.linuxbrew/bin/uvx && echo /home/linuxbrew/.linuxbrew/bin/uvx',
+        'echo __UV__', 'test -x /home/linuxbrew/.linuxbrew/bin/uv && echo /home/linuxbrew/.linuxbrew/bin/uv',
+        'echo __UVL__', 'test -x ${HOME}/.local/bin/uv && echo ${HOME}/.local/bin/uv',
+        'echo __UVC__', 'test -x /home/crack/.cargo/bin/uv && echo /home/crack/.cargo/bin/uv',
+        'echo __PY__', 'command -v python3',
+        'echo __SH__', 'echo ${SHELL}',
+        'echo __OS__', 'grep -m1 PRETTY_NAME /etc/os-release',
+        'echo __KERNEL__', 'uname -r',
+    ].join(';');
+}
 
-    const out = await wslBash(distro, script);
+/** Parse the marker-line probe output (each __KEY__ line is followed by a value line). */
+function parseProbe(distro: string, out: string): WslProbe {
     const probe: WslProbe = { distro, shell: 'bash' };
-    for (const line of out.split(/\r?\n/)) {
-        const m = line.match(/^__([A-Z0-9_]+)__=(.*)$/);
-        if (!m) continue;
-        const raw = m[1]!.toLowerCase();
-        if (raw === 'distro') continue;
-        const value = (m[2] ?? '').trim();
+    const lines = out.split(/\r?\n/);
+    let i = 0;
+    while (i < lines.length) {
+        const m = lines[i]!.match(/^__([A-Z0-9_]+)__$/);
+        if (!m) { i += 1; continue; }
+        const key = m[1]!.toLowerCase();
+        i += 1;
+        const value = (i < lines.length ? lines[i]!.trim() : '');
+        i += 1;
         if (!value) continue;
-        // `python` (__PY2__) is folded into the python slot when python3 is absent.
-        if (raw === 'py2') {
-            if (!probe.python) probe.python = value;
-            continue;
+        switch (key) {
+            case 'uvx': if (!probe.uv && !probe.uvx) probe.uvx = value; break;
+            case 'uv':
+            case 'uvl':
+            case 'uvc': if (!probe.uv) probe.uv = value; break;
+            case 'py': if (!probe.python) probe.python = value; break;
+            case 'sh': probe.shell = value; break;
+            case 'os': probe.osName = cleanOsName(value) || probe.osName; break;
+            case 'kernel': probe.kernel = value; break;
+            default: break;
         }
-        if (raw in probe) (probe[raw as keyof WslProbe] as string) = value;
     }
     if (probe.shell.includes('/')) probe.shell = probe.shell.split('/').pop() ?? probe.shell;
     return probe;
+}
+
+/** Normalize a `PRETTY_NAME="..."` line to (value after first `=`), quotes stripped. */
+function cleanOsName(line: string): string | undefined {
+    const eq = line.indexOf('=');
+    const raw = eq >= 0 ? line.slice(eq + 1).trim() : line.trim();
+    const stripped = raw.replace(/^["']/, '').replace(/["']$/, '');
+    return stripped || undefined;
+}
+
+/** Asynchronous probe (used for warming / refresh). */
+async function probeWsl(distro: string): Promise<WslProbe> {
+    const out = await wslBash(distro, probeScript());
+    return parseProbe(distro, out);
+}
+
+/**
+ * Synchronous probe — runs `wsl.exe` and blocks the current task up to a few
+ * seconds. Cache-and-store on success. Used on the very first WSL render so a
+ * brand-new conversation sees real shell/uv/os data even though the prewarm
+ * probe hasn't settled yet. Returns the probe, or undefined when it fails.
+ */
+function probeWslSync(distro: string): WslProbe | undefined {
+    try {
+        const out = execFileSync(
+            'wsl.exe',
+            ['-d', distro, '--', 'bash', '-lc', probeScript()],
+            { encoding: 'utf8', windowsHide: true, timeout: 20_000, maxBuffer: 4 * 1024 * 1024 },
+        );
+        const probe = parseProbe(distro, String(out));
+        if (!isHealthy(probe)) return undefined;
+        wslSettled.set(distro, probe);
+        wslPersisted.set(distro, probe);
+        persistCache();
+        return probe;
+    } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log?.(`[supermemory:wsl-env] ${distro}: sync probe failed (${msg})`);
+        return undefined;
+    }
 }
 
 /** Schedule a retry with linear backoff (5s,10s,15s… capped at 60s). */
@@ -434,6 +490,19 @@ export function environmentBlock(ctx: Context, session: Session): string {
     let uv: string | undefined;
     if (isWslWorkspace(cwd)) {
         const distro = distroOf(cwd);
+        // First render of a brand-new conversation: the prewarm probe is async
+        // and won't have settled yet. If we have no usable data (not settled,
+        // not persisted, nothing in flight), run one synchronous wsl.exe probe
+        // so shell/uv/os render immediately instead of placeholders. Only once
+        // per distro per process — a failing sync probe must not block later.
+        if (!wslSettled.has(distro)
+            && !wslInFlight.has(distro)
+            && !wslAttempting.has(distro)
+            && !wslSyncProbed.has(distro)
+            && !(isHealthy(wslPersisted.get(distro) ?? ({} as WslProbe)))) {
+            wslSyncProbed.add(distro);
+            probeWslSync(distro);
+        }
         // fs layer gives real data synchronously; persisted cache and the live
         // wsl.exe probe layer on top of it (later sources win).
         const fsProbe = probeWslFs(cwd);
