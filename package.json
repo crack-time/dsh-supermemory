@@ -37,10 +37,7 @@
   },
   "license": "MIT",
   "files": [
-    "lib/client.js",
-    "lib/client.js.map",
-    "lib/index.js",
-    "lib/types",
+    "lib",
     "cordis.patch.yml"
   ],
   "devDependencies": {
