@@ -17,6 +17,7 @@ import { getSessionContainer, setSessionContainer } from './hooks.ts';
 import { discoverContainers } from './containers.ts';
 import { probeHealth } from './upstream.ts';
 import { readBody, readJsonBody, sendJson } from './http-util.ts';
+import { maskApiKey } from './redact.ts';
 import type { ManagedServer } from './managed-server.ts';
 
 export const API_PREFIX = '/plugins/@crack/dsh-supermemory/api';
@@ -27,19 +28,6 @@ function sessionIdFromPath(pathname: string): string {
         (API_PREFIX + '/session/').length,
         pathname.length - '/container'.length,
     );
-}
-
-/**
- * Mask an API key for client-facing responses: the settings card only needs
- * to know whether a key exists (and for the password field's display), never
- * the plaintext — which would otherwise be readable by ANY same-origin script
- * through GET /config. Internal callers keep using resolveConfig() and are
- * unaffected.
- */
-export function maskApiKey(key: string): string {
-    if (!key) return '';
-    if (key.length <= 8) return '****';
-    return key.slice(0, 4) + '****' + key.slice(-4);
 }
 
 /** Config view safe for the browser: both secrets masked, plus has* flags. */
