@@ -8,10 +8,11 @@
  */
 import z from '@deepseek-ai/schemastery';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
+import type { Context } from '@deepseek-ai/cordis';
 export declare const DEFAULT_BASE_URL = "http://localhost:6767";
 export declare const DEFAULT_CONTAINER = "sm_project_default";
-export declare const DEFAULT_OPENAI_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1";
-export declare const DEFAULT_OPENAI_MODEL = "mimo-v2.5";
+export declare const DEFAULT_OPENAI_BASE_URL = "";
+export declare const DEFAULT_OPENAI_MODEL = "";
 /** Resolved settings shape for the "supermemory" namespace. */
 export interface SupermemoryConfig {
     baseUrl: string;
@@ -59,4 +60,4 @@ export declare function setActiveContainer(scope: SettingsScope<any>, tag: strin
 /** Narrow one tool argument to a string with a fallback. */
 export declare function argString(value: unknown, fallback: string): string;
 /** Create the settings scope for the "supermemory" namespace (live applies). */
-export declare function registerSupermemorySettings(ctx: any): SettingsScope<any>;
+export declare function registerSupermemorySettings(ctx: Context): SettingsScope<any>;

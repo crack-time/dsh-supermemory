@@ -9,11 +9,16 @@
 import z from '@deepseek-ai/schemastery';
 import { settingsNamespace } from '@deepseek-ai/dsh-settings';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
+import type { Context } from '@deepseek-ai/cordis';
 
 export const DEFAULT_BASE_URL = 'http://localhost:6767';
 export const DEFAULT_CONTAINER = 'sm_project_default';
-export const DEFAULT_OPENAI_BASE_URL = 'https://token-plan-cn.xiaomimimo.com/v1';
-export const DEFAULT_OPENAI_MODEL = 'mimo-v2.5';
+// The managed supermemory server needs an OpenAI-compatible endpoint to embed
+// with. Leave the defaults empty — a user running the managed server sets their
+// own values in the settings card (a plugin default must not bake in one
+// person's proprietary proxy/endpoint).
+export const DEFAULT_OPENAI_BASE_URL = '';
+export const DEFAULT_OPENAI_MODEL = '';
 
 /** Resolved settings shape for the "supermemory" namespace. */
 export interface SupermemoryConfig {
@@ -92,7 +97,7 @@ export function argString(value: unknown, fallback: string): string {
 }
 
 /** Create the settings scope for the "supermemory" namespace (live applies). */
-export function registerSupermemorySettings(ctx: any): SettingsScope<any> {
+export function registerSupermemorySettings(ctx: Context): SettingsScope<any> {
     return ctx.settings.register(settingsNamespace('supermemory'), SUPERMEMORY_SCHEMA, {
         applies: 'live',
     });

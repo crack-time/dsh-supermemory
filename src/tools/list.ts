@@ -5,6 +5,7 @@ import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
 import { activeContainer, argString, requireUpstream } from '../config.ts';
 import { discoverContainers } from '../containers.ts';
+import { docInContainer, listDocumentPages } from '../upstream.ts';
 
 /**
  * List-containers tool: show all memory spaces with their fact counts.
@@ -141,36 +142,16 @@ export function makeListDocumentsTool(scope: SettingsScope<any>): ToolDefinition
 
             // The upstream /v3/documents/list IGNORES containerTag and returns
             // documents across every container (pagination.totalItems is global),
-            // so we paginate over ALL pages and filter by the container's own
-            // containerTags field. A page cap keeps runaway cases bounded.
-            const MAX_PAGES = 20;
+            // so we walk ALL pages and filter by the container's own tags field.
+            // A page cap keeps runaway cases bounded.
             const all: Array<{ id: string; title?: string; status?: string; createdAt?: string }> = [];
-            let page = 1;
-            let totalPages = 1;
-            do {
-                const res = await fetch(base + '/v3/documents/list', {
-                    method: 'POST',
-                    headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
-                    body: JSON.stringify({ limit, page }),
-                    signal: AbortSignal.timeout(15000),
-                });
-                if (!res.ok) {
-                    throw new Error('supermemory /v3/documents/list failed: HTTP ' + res.status + ' — ' + (await res.text()).slice(0, 200));
-                }
-                const data = (await res.json()) as {
-                    memories?: Array<{ id: string; title?: string; status?: string; createdAt?: string; containerTag?: string; containerTags?: string[] }>;
-                    pagination?: { currentPage?: number; totalPages?: number };
-                };
-                const docs = data.memories ?? [];
+            await listDocumentPages(base, apiKey, { limit, maxPages: 20, timeoutMs: 15000 }, (docs) => {
                 for (const d of docs) {
-                    let match = false;
-                    if (Array.isArray(d.containerTags)) match = d.containerTags.includes(tag);
-                    else if (typeof d.containerTag === 'string') match = d.containerTag === tag;
-                    if (match) all.push({ id: d.id, title: d.title, status: d.status, createdAt: d.createdAt });
+                    if (docInContainer(d, tag)) {
+                        all.push({ id: d.id, title: d.title, status: d.status, createdAt: d.createdAt });
+                    }
                 }
-                totalPages = data.pagination?.totalPages ?? 1;
-                page = (data.pagination?.currentPage ?? page) + 1;
-            } while (page <= totalPages && page <= MAX_PAGES);
+            });
 
             // Apply client-side offset/limit for the window view.
             const windowDocs = all.slice(offset, offset + limit);

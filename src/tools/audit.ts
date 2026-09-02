@@ -10,6 +10,7 @@
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
 import { activeContainer, argString, requireUpstream } from '../config.ts';
+import { apiFetch, docInContainer, listDocumentPages } from '../upstream.ts';
 
 /**
  * Heuristics for "likely low value". A document is flagged low-value when it
@@ -34,25 +35,30 @@ function flagLowValue(content: string, memCount: number): { low: boolean; reason
     return { low: false };
 }
 
-/** Fetch a single document's detail (content + memories + status) from upstream. */
+/** Fetch a single document's detail (content + memories + status) from upstream. Does not throw. */
 async function fetchDocDetail(
     base: string,
     apiKey: string,
     docId: string,
     signal: AbortSignal,
 ): Promise<{ content: string; memCount: number; status: string; customId: string }> {
-    const res = await fetch(base + '/v3/documents/' + encodeURIComponent(docId), {
-        headers: { authorization: 'Bearer ' + apiKey },
-        signal,
-    });
-    if (!res.ok) return { content: '', memCount: -1, status: 'not-found', customId: '' }; // -1 = detail fetch failed
-    const data = (await res.json()) as { content?: string; memories?: unknown[]; status?: string; customId?: string };
-    return {
-        content: data.content ?? '',
-        memCount: Array.isArray(data.memories) ? data.memories.length : 0,
-        status: data.status ?? 'unknown',
-        customId: data.customId ?? '',
-    };
+    try {
+        const data = await apiFetch<{ content?: string; memories?: unknown[]; status?: string; customId?: string }>(
+            base,
+            apiKey,
+            '/v3/documents/' + encodeURIComponent(docId),
+            { signal },
+        );
+        return {
+            content: data.content ?? '',
+            memCount: Array.isArray(data.memories) ? data.memories.length : 0,
+            status: data.status ?? 'unknown',
+            customId: data.customId ?? '',
+        };
+    }
+    catch {
+        return { content: '', memCount: -1, status: 'not-found', customId: '' }; // -1 = detail fetch failed
+    }
 }
 
 /**
@@ -159,33 +165,12 @@ export function makeAuditDocsTool(scope: SettingsScope<any>): ToolDefinition {
                 docs.push(...ids.map((id) => ({ id })));
             }
             else {
-                // 1. Enumerate every document summary in the container (paginate over all pages).
-                const MAX_PAGES = 20;
-                let page = 1;
-                let totalPages = 1;
-                do {
-                    const res = await fetch(base + '/v3/documents/list', {
-                        method: 'POST',
-                        headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
-                        body: JSON.stringify({ limit: 200, page }),
-                        signal: AbortSignal.timeout(15000),
-                    });
-                    if (!res.ok) {
-                        throw new Error('supermemory /v3/documents/list failed: HTTP ' + res.status + ' — ' + (await res.text()).slice(0, 200));
+                // 1. Enumerate every document summary in the container (walk all pages).
+                await listDocumentPages(base, apiKey, { limit: 200, maxPages: 20, timeoutMs: 15000 }, (pageDocs) => {
+                    for (const d of pageDocs) {
+                        if (docInContainer(d, tag)) docs.push({ id: d.id, customId: d.customId, status: d.status });
                     }
-                    const data = (await res.json()) as {
-                        memories?: Array<{ id: string; customId?: string; status?: string; containerTag?: string; containerTags?: string[] }>;
-                        pagination?: { currentPage?: number; totalPages?: number };
-                    };
-                    for (const d of data.memories ?? []) {
-                        let match = false;
-                        if (Array.isArray(d.containerTags)) match = d.containerTags.includes(tag);
-                        else if (typeof d.containerTag === 'string') match = d.containerTag === tag;
-                        if (match) docs.push({ id: d.id, customId: d.customId, status: d.status });
-                    }
-                    totalPages = data.pagination?.totalPages ?? 1;
-                    page = (data.pagination?.currentPage ?? page) + 1;
-                } while (page <= totalPages && page <= MAX_PAGES);
+                });
             }
 
             // 2. Fetch each doc's detail (bounded concurrency) to get content length + memory count.

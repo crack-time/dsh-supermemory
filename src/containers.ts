@@ -12,6 +12,7 @@
  */
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
 import { DEFAULT_CONTAINER, activeContainer, requireUpstream } from './config.ts';
+import { apiFetch, containerTagsOf, listDocumentPages } from './upstream.ts';
 
 export interface ContainerEntry {
     tag: string;
@@ -20,12 +21,8 @@ export interface ContainerEntry {
     docCount: number;
 }
 
-export interface ListDoc {
-    id?: string;
-    title?: string;
-    containerTag?: string;
-    containerTags?: string[];
-    [key: string]: unknown;
+interface ProfileData {
+    profile?: { static?: string[]; dynamic?: string[] };
 }
 
 /** Discover every container present upstream and fetch profile + doc counts. */
@@ -34,61 +31,37 @@ export async function discoverContainers(
     apiKey: string,
     opts: { timeoutMs?: number; maxTags?: number; defaults?: string[] } = {},
 ): Promise<ContainerEntry[]> {
-    const timeoutMs = opts.timeoutMs ?? 8000;
     const maxTags = opts.maxTags ?? 50;
     const defaults = opts.defaults ?? [DEFAULT_CONTAINER];
-    // 1. List every document (no container filter) and read its containerTags.
-    const listRes = await fetch(base + '/v3/documents/list', {
-        method: 'POST',
-        headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
-        body: JSON.stringify({ limit: 1000 }),
-        signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (!listRes.ok) {
-        throw new Error('documents list failed: HTTP ' + listRes.status);
-    }
-    const listData = (await listRes.json()) as { memories?: ListDoc[] };
+    const signal = opts.timeoutMs !== undefined ? AbortSignal.timeout(opts.timeoutMs) : undefined;
+
+    // 1. Walk every document (no container filter) and count each tag.
     const docCounts = new Map<string, number>();
-    for (const d of listData.memories ?? []) {
-        let tags: string[] = [];
-        if (Array.isArray(d.containerTags)) tags = d.containerTags;
-        else if (typeof d.containerTag === 'string' && d.containerTag.trim())
-            tags = [d.containerTag.trim()];
-        if (tags.length === 0) continue;
-        for (const tag of tags) {
-            if (!tag.trim()) continue;
-            docCounts.set(tag, (docCounts.get(tag) ?? 0) + 1);
+    await listDocumentPages(base, apiKey, { limit: 1000, signal }, (docs) => {
+        for (const d of docs) {
+            for (const tag of containerTagsOf(d)) {
+                docCounts.set(tag, (docCounts.get(tag) ?? 0) + 1);
+            }
         }
-    }
+    });
+
     // Always include the defaults so the list is never empty.
     for (const def of defaults) {
         if (!docCounts.has(def)) docCounts.set(def, 0);
     }
+
     // 2. Fetch each tag's profile counts IN PARALLEL (bounded). A slow tag
     //    no longer serializes the rest; individual failures keep zeros.
     const tags = [...docCounts.keys()].slice(0, maxTags);
-    const results = await Promise.allSettled(
-        tags.map(async (tag) => {
-            const res = await fetch(base + '/v4/profile', {
-                method: 'POST',
-                headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
-                body: JSON.stringify({ containerTag: tag }),
-                signal: AbortSignal.timeout(5000),
-            });
-            if (!res.ok) return { staticCount: 0, dynamicCount: 0 };
-            const data = (await res.json()) as { profile?: { static?: string[]; dynamic?: string[] } };
-            return {
-                staticCount: (data.profile?.static ?? []).length,
-                dynamicCount: (data.profile?.dynamic ?? []).length,
-            };
-        }),
-    );
+    const counts = await Promise.all(tags.map((tag) => profileCounts(base, apiKey, tag)));
     const entries: ContainerEntry[] = tags.map((tag, i) => {
-        const r = results[i];
-        if (r && r.status === 'fulfilled') {
-            return { tag, staticCount: r.value.staticCount, dynamicCount: r.value.dynamicCount, docCount: docCounts.get(tag) ?? 0 };
-        }
-        return { tag, staticCount: 0, dynamicCount: 0, docCount: docCounts.get(tag) ?? 0 };
+        const c = counts[i] ?? { staticCount: 0, dynamicCount: 0 };
+        return {
+            tag,
+            staticCount: c.staticCount,
+            dynamicCount: c.dynamicCount,
+            docCount: docCounts.get(tag) ?? 0,
+        };
     });
     entries.sort((a, b) => b.docCount - a.docCount || b.staticCount + b.dynamicCount - (a.staticCount + a.dynamicCount));
     return entries;
@@ -97,42 +70,41 @@ export async function discoverContainers(
 /** Fetch the stored profile (static + dynamic facts) for the given container. */
 export async function fetchProfile(scope: SettingsScope<any>, containerTag?: string): Promise<string> {
     const { base, apiKey } = requireUpstream(scope);
-    const res = await fetch(base + '/v4/profile', {
-        method: 'POST',
-        headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
-        body: JSON.stringify({ containerTag: containerTag || activeContainer(scope) }),
-        signal: AbortSignal.timeout(10000),
-    });
-    if (!res.ok) return '';
-    const data = (await res.json()) as { profile?: { static?: string[]; dynamic?: string[] } };
+    let data: ProfileData | undefined;
+    try {
+        data = await apiFetch<ProfileData>(base, apiKey, '/v4/profile', {
+            method: 'POST',
+            body: { containerTag: containerTag || activeContainer(scope) },
+            timeoutMs: 10000,
+        });
+    }
+    catch {
+        data = undefined;
+    }
     const lines: string[] = [];
-    const stat = data.profile?.static ?? [];
-    const dyn = data.profile?.dynamic ?? [];
+    const stat = data?.profile?.static ?? [];
+    const dyn = data?.profile?.dynamic ?? [];
     if (stat.length > 0) lines.push('Long-term facts (static):\n- ' + stat.join('\n- '));
     if (dyn.length > 0) lines.push('Recent dynamics (dynamic):\n- ' + dyn.join('\n- '));
     return lines.join('\n\n');
 }
 
-/** Fetch a tag's raw profile counts (for the select/list tools and card). */
+/** Fetch a tag's raw profile counts (for the select/list tools and card). Never throws. */
 export async function profileCounts(
     base: string,
     apiKey: string,
     tag: string,
 ): Promise<{ staticCount: number; dynamicCount: number }> {
     try {
-        const res = await fetch(base + '/v4/profile', {
+        const data = await apiFetch<ProfileData>(base, apiKey, '/v4/profile', {
             method: 'POST',
-            headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
-            body: JSON.stringify({ containerTag: tag }),
-            signal: AbortSignal.timeout(5000),
+            body: { containerTag: tag },
+            timeoutMs: 5000,
         });
-        if (res.ok) {
-            const data = (await res.json()) as { profile?: { static?: string[]; dynamic?: string[] } };
-            return {
-                staticCount: (data.profile?.static ?? []).length,
-                dynamicCount: (data.profile?.dynamic ?? []).length,
-            };
-        }
+        return {
+            staticCount: (data.profile?.static ?? []).length,
+            dynamicCount: (data.profile?.dynamic ?? []).length,
+        };
     }
     catch { /* keep zeros */ }
     return { staticCount: 0, dynamicCount: 0 };

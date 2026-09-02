@@ -15,6 +15,7 @@ import {
 } from './config.ts';
 import { getSessionContainer, setSessionContainer } from './hooks.ts';
 import { discoverContainers } from './containers.ts';
+import { probeHealth } from './upstream.ts';
 import type { ManagedServer } from './managed-server.ts';
 
 export const API_PREFIX = '/plugins/@crack/dsh-supermemory/api';
@@ -38,6 +39,21 @@ export function readBody(req: IncomingMessage): Promise<string> {
         req.on('end', () => resolve(data));
         req.on('error', reject);
     });
+}
+
+/** Read + JSON-parse a request body; an empty body becomes {}. Parse errors propagate. */
+async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+    const text = await readBody(req);
+    if (!text.trim()) return {};
+    return JSON.parse(text) as Record<string, unknown>;
+}
+
+/** Extract the session id from the /session/<sid>/container path. */
+function sessionIdFromPath(pathname: string): string {
+    return pathname.slice(
+        (API_PREFIX + '/session/').length,
+        pathname.length - '/container'.length,
+    );
 }
 
 /**
@@ -72,28 +88,15 @@ async function health(scope: SettingsScope<any>): Promise<Record<string, unknown
     if (!cfg.apiKey) {
         return { ok: false, configured: false, baseUrl: base, error: 'api key not configured' };
     }
-    try {
-        const upstream = await fetch(base + '/v3/settings', {
-            headers: { authorization: 'Bearer ' + cfg.apiKey },
-            signal: AbortSignal.timeout(8000),
-        });
-        return {
-            ok: upstream.ok,
-            configured: true,
-            baseUrl: base,
-            reachable: upstream.ok,
-            status: upstream.status,
-        };
-    }
-    catch (error) {
-        return {
-            ok: false,
-            configured: true,
-            baseUrl: base,
-            reachable: false,
-            error: error instanceof Error ? error.message : String(error),
-        };
-    }
+    const probe = await probeHealth(base, cfg.apiKey, 8000);
+    return {
+        ok: probe.ok,
+        configured: true,
+        baseUrl: base,
+        reachable: probe.ok,
+        ...(probe.status !== undefined ? { status: probe.status } : {}),
+        ...(probe.error !== undefined ? { error: probe.error } : {}),
+    };
 }
 
 /**
@@ -181,37 +184,29 @@ export async function handleApi(
             }
         }
         if (method === 'POST' && pathname === API_PREFIX + '/config') {
-            const body = JSON.parse((await readBody(req)) || '{}') as { patch?: unknown };
-            if (!body.patch || typeof body.patch !== 'object' || Array.isArray(body.patch)) {
+            const body = await readJsonBody(req);
+            const patch = body.patch;
+            if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
                 return sendJson(res, 400, { error: 'patch (object) required' });
             }
-            await scope.update(body.patch);
+            await scope.update(patch);
             await managed.sync(scope, ctx); // reconcile the managed process after save
             // Never echo the plaintext key back — clients get the masked view.
             return sendJson(res, 200, clientConfig(scope));
         }
-        // Per-session container lookup: returns the session's snapshot first,
-        // then falls back to the current global setting.
-        const sessionContainerMatch = method === 'GET' && pathname.startsWith(API_PREFIX + '/session/')
-            && pathname.endsWith('/container');
-        if (sessionContainerMatch) {
-            const sid = pathname.slice(
-                (API_PREFIX + '/session/').length,
-                pathname.length - '/container'.length,
-            );
+        // Per-session container routes (GET lookup / PUT switch) share one path shape.
+        const isSessionContainer =
+            method === 'GET' || method === 'PUT'
+                ? pathname.startsWith(API_PREFIX + '/session/') && pathname.endsWith('/container')
+                : false;
+        if (isSessionContainer && method === 'GET') {
+            const sid = sessionIdFromPath(pathname);
             const tag = getSessionContainer(sid) ?? activeContainer(scope);
             return sendJson(res, 200, { containerTag: tag });
         }
-        // Per-session container switch: updates the session snapshot so this
-        // session's injection + persistence stay bound to the chosen space.
-        const sessionContainerPut = method === 'PUT' && pathname.startsWith(API_PREFIX + '/session/')
-            && pathname.endsWith('/container');
-        if (sessionContainerPut) {
-            const sid = pathname.slice(
-                (API_PREFIX + '/session/').length,
-                pathname.length - '/container'.length,
-            );
-            const body = JSON.parse((await readBody(req)) || '{}') as { containerTag?: unknown };
+        if (isSessionContainer && method === 'PUT') {
+            const sid = sessionIdFromPath(pathname);
+            const body = await readJsonBody(req);
             const tag = typeof body.containerTag === 'string' ? body.containerTag.trim() : '';
             if (!tag) return sendJson(res, 400, { error: 'containerTag (non-empty string) required' });
             setSessionContainer(sid, tag);
@@ -220,7 +215,7 @@ export async function handleApi(
         if (method === 'PUT' && pathname === API_PREFIX + '/active-container') {
             // Dedicated, validated switch path used by the settings card —
             // keeps container switching in one function.
-            const body = JSON.parse((await readBody(req)) || '{}') as { containerTag?: unknown };
+            const body = await readJsonBody(req);
             const tag = typeof body.containerTag === 'string' ? body.containerTag.trim() : '';
             if (!tag) return sendJson(res, 400, { error: 'containerTag (non-empty string) required' });
             await setActiveContainer(scope, tag);

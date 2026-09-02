@@ -3,7 +3,8 @@
  *  - session/created -> snapshot the container + fetch profile into cache;
  *    the systemPrompt.context() registration reads the cache synchronously
  *    on every model step, so no agent.inject() is needed.
- *  - turn/end -> persist each finished turn as one supermemory document.
+ *  - turn/end -> accumulate the turn transcript and PATCH it into the
+ *    session's single supermemory document (each session owns one doc).
  *    Subagent sessions are skipped for both hooks.
  */
 import type { Context } from '@deepseek-ai/cordis';
@@ -13,6 +14,7 @@ import { activeContainer, requireUpstream } from './config.ts';
 import { fetchProfile } from './containers.ts';
 import { turnTranscript } from './transcript.ts';
 import { environmentBlock } from './environment.ts';
+import { apiFetch } from './upstream.ts';
 
 // ---------------------------------------------------------------------------
 // Context injection via systemPrompt.context()
@@ -195,57 +197,47 @@ async function persistTurn(
         const { base, apiKey } = requireUpstream(scope);
         const workspace = await workspaceOf(ctx, session);
         const containerTag = sessionContainerRef.get(session.id) ?? activeContainer(scope);
-        const headers = { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' };
         const meta: Record<string, unknown> = {
             sessionId: session.id,
             lastTurn: turn,
             ...(workspace ? { workspace } : {}),
         };
+        const signal = AbortSignal.timeout(30000);
 
         if (entry.docId) {
             // Update existing session document with the cumulative transcript.
-            const res = await fetch(base + '/v3/documents/' + encodeURIComponent(entry.docId), {
+            await apiFetch(base, apiKey, '/v3/documents/' + encodeURIComponent(entry.docId), {
                 method: 'PATCH',
-                headers,
-                body: JSON.stringify({
+                body: {
                     content: entry.fullText,
                     taskType: 'memory',
                     documentDate: new Date().toISOString(),
-                }),
-                signal: AbortSignal.timeout(30000),
+                },
+                signal,
             });
-            if (!res.ok) {
-                ctx.logger.warn(
-                    'supermemory turn PATCH: HTTP ' + res.status + ' ' + (await res.text()).slice(0, 200),
-                );
-                return;
-            }
             await waitDocumentDone(base, apiKey, entry.docId);
         }
         else {
             // First turn: create the session document.
             const customId = session.id.replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 100);
-            const res = await fetch(base + '/v3/documents', {
-                method: 'POST',
-                headers,
-                body: JSON.stringify({
-                    content: entry.fullText,
-                    containerTag,
-                    customId,
-                    taskType: 'memory',
-                    dreaming: 'dynamic',
-                    documentDate: new Date().toISOString(),
-                    metadata: meta,
-                }),
-                signal: AbortSignal.timeout(30000),
-            });
-            if (!res.ok) {
-                ctx.logger.warn(
-                    'supermemory session create: HTTP ' + res.status + ' ' + (await res.text()).slice(0, 200),
-                );
-                return;
-            }
-            const created = (await res.json()) as { id?: string; status?: string };
+            const created = await apiFetch<{ id?: string; status?: string }>(
+                base,
+                apiKey,
+                '/v3/documents',
+                {
+                    method: 'POST',
+                    body: {
+                        content: entry.fullText,
+                        containerTag,
+                        customId,
+                        taskType: 'memory',
+                        dreaming: 'dynamic',
+                        documentDate: new Date().toISOString(),
+                        metadata: meta,
+                    },
+                    signal,
+                },
+            );
             if (created.id) {
                 entry.docId = created.id;
                 ctx.logger.debug('supermemory session doc created id=' + created.id + ' session=' + session.id);

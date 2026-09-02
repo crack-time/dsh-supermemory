@@ -17,13 +17,6 @@ export interface ContainerEntry {
     dynamicCount: number;
     docCount: number;
 }
-export interface ListDoc {
-    id?: string;
-    title?: string;
-    containerTag?: string;
-    containerTags?: string[];
-    [key: string]: unknown;
-}
 /** Discover every container present upstream and fetch profile + doc counts. */
 export declare function discoverContainers(base: string, apiKey: string, opts?: {
     timeoutMs?: number;
@@ -32,7 +25,7 @@ export declare function discoverContainers(base: string, apiKey: string, opts?: 
 }): Promise<ContainerEntry[]>;
 /** Fetch the stored profile (static + dynamic facts) for the given container. */
 export declare function fetchProfile(scope: SettingsScope<any>, containerTag?: string): Promise<string>;
-/** Fetch a tag's raw profile counts (for the select/list tools and card). */
+/** Fetch a tag's raw profile counts (for the select/list tools and card). Never throws. */
 export declare function profileCounts(base: string, apiKey: string, tag: string): Promise<{
     staticCount: number;
     dynamicCount: number;

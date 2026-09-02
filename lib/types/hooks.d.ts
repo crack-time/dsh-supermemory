@@ -3,7 +3,8 @@
  *  - session/created -> snapshot the container + fetch profile into cache;
  *    the systemPrompt.context() registration reads the cache synchronously
  *    on every model step, so no agent.inject() is needed.
- *  - turn/end -> persist each finished turn as one supermemory document.
+ *  - turn/end -> accumulate the turn transcript and PATCH it into the
+ *    session's single supermemory document (each session owns one doc).
  *    Subagent sessions are skipped for both hooks.
  */
 import type { Context } from '@deepseek-ai/cordis';

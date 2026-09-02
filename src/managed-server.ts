@@ -11,6 +11,7 @@ import { dirname } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
 import { resolveConfig, upstreamBase } from './config.ts';
+import { probeHealth } from './upstream.ts';
 
 export type ManagedState =
     | 'no-path'       // serverPath empty (waiting for the card)
@@ -50,17 +51,7 @@ export class ManagedServer {
 
     /** Is the configured base URL already reachable (health probe against upstream /v3/settings). */
     private async probe(cfg: ReturnType<typeof resolveConfig>): Promise<boolean> {
-        try {
-            const res = await fetch(upstreamBase(cfg) + '/v3/settings', {
-                headers: { authorization: 'Bearer ' + cfg.apiKey },
-                signal: AbortSignal.timeout(2500),
-            });
-            return res.ok;
-        }
-        catch {
-            // Unreachable/timeout: treat as 'no instance running' so the managed server starts.
-            return false;
-        }
+        return (await probeHealth(upstreamBase(cfg), cfg.apiKey, 2500)).ok;
     }
 
     /**
@@ -140,10 +131,8 @@ export class ManagedServer {
                     const line = String(buf).trim();
                     if (!line) return;
                     if (tag === 'stderr') {
-                        this.info = { ...this.info, stderrTail: (this.info.stderrTail ?? '') + '\n' + line.slice(-400) };
-                        if ((this.info.stderrTail?.length ?? 0) > 1200) {
-                            this.info.stderrTail = this.info.stderrTail!.slice(-1200);
-                        }
+                        const tail = (this.info.stderrTail ?? '') + '\n' + line.slice(-400);
+                        this.info = { ...this.info, stderrTail: tail.length > 1200 ? tail.slice(-1200) : tail };
                         ctx.logger.debug('[supermemory server] ' + line);
                     }
                     else {

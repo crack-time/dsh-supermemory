@@ -4,6 +4,7 @@
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
 import { activeContainer, argString, requireUpstream } from '../config.ts';
+import { apiFetch } from '../upstream.ts';
 
 /**
  * supersonic semantic search tool: model-facing recall over the local
@@ -73,19 +74,14 @@ export function makeSearchTool(scope: SettingsScope<any>): ToolDefinition {
             const raw = typeof a.limit === 'number' && Number.isFinite(a.limit) ? Math.floor(a.limit) : 5;
             const limit = Math.min(20, Math.max(1, raw));
             const { base, apiKey } = requireUpstream(scope);
-            const res = await fetch(base + '/v4/search', {
-                method: 'POST',
-                headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
-                body: JSON.stringify({ q: query, containerTag: tag, threshold: 0.5, limit }),
-                signal: exec.signal,
-            });
-            if (!res.ok) {
-                throw new Error(`supermemory /v4/search failed: HTTP ${res.status} — ${(await res.text()).slice(0, 200)}`);
-            }
-            const data = (await res.json()) as {
+            const data = await apiFetch<{
                 memories?: Array<{ memory?: string }>;
                 results?: Array<{ memory?: string }>;
-            };
+            }>(base, apiKey, '/v4/search', {
+                method: 'POST',
+                body: { q: query, containerTag: tag, threshold: 0.5, limit },
+                signal: exec.signal,
+            });
             const results = (data.memories ?? data.results ?? [])
                 .map((m) => ({ memory: m.memory ?? '' }))
                 .filter((m) => m.memory.length > 0);
@@ -146,16 +142,11 @@ export function makeSaveTool(scope: SettingsScope<any>): ToolDefinition {
             const isStatic = a.isStatic === true;
             const tag = argString(a.containerTag, activeContainer(scope));
             const { base, apiKey } = requireUpstream(scope);
-            const res = await fetch(base + '/v4/memories', {
+            const data = await apiFetch<{ memories?: Array<{ id?: string }> }>(base, apiKey, '/v4/memories', {
                 method: 'POST',
-                headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
-                body: JSON.stringify({ memories: [{ content, isStatic }], containerTag: tag }),
+                body: { memories: [{ content, isStatic }], containerTag: tag },
                 signal: exec.signal,
             });
-            if (!res.ok) {
-                throw new Error(`supermemory /v4/memories failed: HTTP ${res.status} — ${(await res.text()).slice(0, 200)}`);
-            }
-            const data = (await res.json()) as { memories?: Array<{ id?: string }> };
             const created = Array.isArray(data.memories) ? data.memories.length : 1;
             return { ok: true, created };
         },

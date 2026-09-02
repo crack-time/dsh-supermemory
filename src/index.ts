@@ -4,22 +4,22 @@
  * Registers one settings namespace ("supermemory": baseUrl + apiKey), a
  * prefix route on dsh's own web server (reverse proxy + health + config +
  * container API), the AI-facing memory tools and the deterministic session
- * hooks (profile injection on session/created, batched turn persistence on
- * turn/end). Implementation lives in the sibling modules:
+ * hooks (profile injection on session/created, session-scoped turn persistence
+ * on turn/end). Implementation lives in the sibling modules:
  *
  *   config.ts          settings schema + config resolution
  *   managed-server.ts  managed local supermemory server process
  *   http.ts            proxy + health + /api routes
  *   containers.ts      container discovery + profile fetch
- *   tools/              memory tools (search, crud, list + barrel index)
+ *   tools/              memory tools (search, crud, list, audit + barrel index)
+ *   upstream.ts         shared authenticated HTTP + pagination helpers
  *   hooks.ts           systemPrompt.context() registration + turn persistence
  */
 // Type-only imports: they only load the declaration merging into the cordis
 // Context (`ctx.webServer` here); erased at compile time, zero runtime cost.
 import type {} from '@deepseek-ai/dsh-host-webserver';
 import type { Context } from '@deepseek-ai/cordis';
-// Type-only merges: ctx.agents (dsh-agent-loop) and ctx.workspaceRegistry.
-import type {} from '@deepseek-ai/dsh-agent-loop';
+// Type-only merge: ctx.workspaceRegistry.
 import type {} from '@deepseek-ai/dsh-workspace';
 import { registerSupermemorySettings } from './config.ts';
 import { ManagedServer } from './managed-server.ts';
@@ -27,8 +27,8 @@ import { handleApi, API_PREFIX } from './http.ts';
 import { registerMemoryTools } from './tools/index.ts';
 import { registerSessionHooks } from './hooks.ts';
 
-/** Required services: the web route registry, the user-settings seam, the tool registry, and the agent factory (for context injection). */
-const inject = ['webServer', 'settings', 'tools', 'agents', 'workspaceRegistry', 'systemPrompt', 'shell'];
+/** Required services: the web route registry, the user-settings seam, the tool registry, the workspace resolver, the prompt-context system and the shell executor. */
+const inject = ['webServer', 'settings', 'tools', 'workspaceRegistry', 'systemPrompt', 'shell'];
 
 function apply(ctx: Context): void {
     // "supermemory" settings namespace: dsh rc.7 renders it as a settings card

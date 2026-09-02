@@ -4,6 +4,7 @@
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
 import { activeContainer, argString, requireUpstream } from '../config.ts';
+import { apiFetch, docInContainer, listDocumentPages } from '../upstream.ts';
 
 /**
  * Memory-forget tool: delete memories from the local Supermemory store —
@@ -98,18 +99,13 @@ export function makeForgetTool(scope: SettingsScope<any>): ToolDefinition {
             if (ids.length > 0) body.ids = ids;
             if (query) body.query = query;
             if (reason) body.reason = reason;
-            const res = await fetch(base + '/v4/memories/forget-matching', {
+            const data = await apiFetch<{
+                dryRun?: boolean; count?: number; forgetBatchId?: string | null; summary?: string;
+            }>(base, apiKey, '/v4/memories/forget-matching', {
                 method: 'POST',
-                headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
-                body: JSON.stringify(body),
+                body,
                 signal: exec.signal,
             });
-            if (!res.ok) {
-                throw new Error('supermemory /v4/memories/forget-matching failed: HTTP ' + res.status + ' — ' + (await res.text()).slice(0, 200));
-            }
-            const data = (await res.json()) as {
-                dryRun?: boolean; count?: number; forgetBatchId?: string | null; summary?: string;
-            };
             return {
                 dryRun: data.dryRun === true,
                 count: typeof data.count === 'number' ? data.count : 0,
@@ -119,6 +115,12 @@ export function makeForgetTool(scope: SettingsScope<any>): ToolDefinition {
         },
         timeoutMs: 30000,
     };
+}
+
+interface MemoryEntry {
+    id: string;
+    memory?: string;
+    documentIds?: string[];
 }
 
 /**
@@ -194,114 +196,72 @@ export function makeDeleteDocumentTool(scope: SettingsScope<any>): ToolDefinitio
         },
         execute: async (args, exec) => {
             const a = (args ?? {}) as { ids?: unknown; sessionId?: unknown; containerTag?: unknown; dryRun?: unknown; confirm?: unknown };
-            let docIds = Array.isArray(a.ids)
+            const requestedIds = Array.isArray(a.ids)
                 ? a.ids.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map((x) => x.trim())
                 : [];
             const sessionId = typeof a.sessionId === 'string' ? a.sessionId.trim() : '';
-            if (docIds.length === 0 && !sessionId) {
+            if (requestedIds.length === 0 && !sessionId) {
                 throw new Error('supermemory_delete_document: provide either ids (non-empty array) or sessionId (non-empty string).');
             }
-            if (docIds.length > 0 && sessionId) {
+            if (requestedIds.length > 0 && sessionId) {
                 throw new Error('supermemory_delete_document: provide either ids or sessionId, not both.');
             }
-            if (docIds.length > 100) throw new Error('supermemory_delete_document: at most 100 ids per call');
+            if (requestedIds.length > 100) throw new Error('supermemory_delete_document: at most 100 ids per call');
             const dryRun = a.dryRun === true;
             const confirm = a.confirm === true;
             const { base, apiKey } = requireUpstream(scope);
             const tag = argString(a.containerTag, activeContainer(scope));
 
             // If sessionId provided, resolve it → document IDs by scanning v3 documents list.
-            if (sessionId && docIds.length === 0) {
+            let docIds = requestedIds;
+            if (sessionId) {
                 const resolved: string[] = [];
-                let page = 1;
-                const MAX_PAGES = 20;
-                do {
-                    const res = await fetch(base + '/v3/documents/list', {
-                        method: 'POST',
-                        headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
-                        body: JSON.stringify({ limit: 200, page }),
-                        signal: exec.signal,
-                    });
-                    if (!res.ok) break;
-                    const data = (await res.json()) as {
-                        memories?: Array<{ id: string; metadata?: { sessionId?: string }; containerTags?: string[] }>;
-                        pagination?: { currentPage?: number; totalPages?: number };
-                    };
-                    for (const d of data.memories ?? []) {
-                        if (d.metadata?.sessionId === sessionId) {
-                            // If containerTag filter is set, respect it.
-                            if (tag && !(d.containerTags ?? []).includes(tag)) continue;
-                            resolved.push(d.id);
-                        }
+                await listDocumentPages(base, apiKey, { limit: 200, maxPages: 20, signal: exec.signal }, (docs) => {
+                    for (const d of docs) {
+                        if (d.metadata?.sessionId !== sessionId) continue;
+                        if (tag && !docInContainer(d, tag)) continue;
+                        resolved.push(d.id);
                     }
-                    const tp = data.pagination?.totalPages ?? 1;
-                    page = (data.pagination?.currentPage ?? page) + 1;
-                    if (page > tp) break;
-                } while (page <= MAX_PAGES);
+                });
                 docIds = resolved;
             }
 
-            // Step 1: Resolve document IDs → titles via /v3/documents/list
-            //         and document IDs → memory IDs via /v4/memories/list.
+            // Resolve document IDs → titles (via v3 documents) and document IDs →
+            // memory IDs (via v4 memories list) so we can preview and cascade the
+            // side effects.
             const docIdSet = new Set(docIds);
             const titleMap = new Map<string, string>();
             const docToMemIds = new Map<string, string[]>();
 
-            // Resolve titles from v3 documents list.
-            {
-                let page = 1;
-                const MAX_PAGES = 10;
-                do {
-                    const res = await fetch(base + '/v3/documents/list', {
-                        method: 'POST',
-                        headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
-                        body: JSON.stringify({ limit: 200, page }),
-                        signal: exec.signal,
-                    });
-                    if (!res.ok) break;
-                    const data = (await res.json()) as {
-                        memories?: Array<{ id: string; title?: string }>;
-                        pagination?: { currentPage?: number; totalPages?: number };
-                    };
-                    for (const d of data.memories ?? []) {
-                        if (docIdSet.has(d.id)) titleMap.set(d.id, (d.title ?? '').slice(0, 80));
-                    }
-                    const tp = data.pagination?.totalPages ?? 1;
-                    page = (data.pagination?.currentPage ?? page) + 1;
-                    if (page > tp) break;
-                } while (page <= MAX_PAGES);
-            }
+            await listDocumentPages(base, apiKey, { limit: 200, maxPages: 10, signal: exec.signal }, (docs) => {
+                for (const d of docs) {
+                    if (docIdSet.has(d.id)) titleMap.set(d.id, (d.title ?? '').slice(0, 80));
+                }
+            });
 
-            // Resolve memory IDs from v4 memories list.
-            {
-                let page = 1;
-                const MAX_PAGES = 20;
-                do {
-                    const res = await fetch(base + '/v4/memories/list', {
-                        method: 'POST',
-                        headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
-                        body: JSON.stringify({ containerTags: [tag], limit: 100, page }),
-                        signal: exec.signal,
-                    });
-                    if (!res.ok) break;
-                    const data = (await res.json()) as {
-                        memoryEntries?: Array<{ id: string; memory?: string; documentIds?: string[] }>;
-                        pagination?: { currentPage?: number; totalPages?: number };
-                    };
-                    for (const e of data.memoryEntries ?? []) {
-                        for (const dId of e.documentIds ?? []) {
-                            if (docIdSet.has(dId)) {
-                                if (!docToMemIds.has(dId)) docToMemIds.set(dId, []);
-                                docToMemIds.get(dId)!.push(e.id);
-                                if (!titleMap.has(dId)) titleMap.set(dId, (e.memory ?? '').slice(0, 80));
-                            }
-                        }
+            let page = 1;
+            let totalPages = 1;
+            do {
+                const data = await apiFetch<{
+                    memoryEntries?: MemoryEntry[];
+                    pagination?: { currentPage?: number; totalPages?: number };
+                }>(base, apiKey, '/v4/memories/list', {
+                    method: 'POST',
+                    body: { containerTags: [tag], limit: 100, page },
+                    signal: exec.signal,
+                });
+                for (const e of data.memoryEntries ?? []) {
+                    for (const dId of e.documentIds ?? []) {
+                        if (!docIdSet.has(dId)) continue;
+                        const arr = docToMemIds.get(dId) ?? [];
+                        arr.push(e.id);
+                        docToMemIds.set(dId, arr);
+                        if (!titleMap.has(dId)) titleMap.set(dId, (e.memory ?? '').slice(0, 80));
                     }
-                    const tp = data.pagination?.totalPages ?? 1;
-                    page = (data.pagination?.currentPage ?? page) + 1;
-                    if (page > tp) break;
-                } while (page <= MAX_PAGES);
-            }
+                }
+                totalPages = data.pagination?.totalPages ?? 1;
+                page = (data.pagination?.currentPage ?? page) + 1;
+            } while (page <= totalPages && page <= 20);
 
             const targets = docIds.map((id) => ({ id, title: titleMap.get(id) ?? '' }));
 
@@ -325,32 +285,30 @@ export function makeDeleteDocumentTool(scope: SettingsScope<any>): ToolDefinitio
             let memForgotten = 0;
             for (let i = 0; i < allMemIds.length; i += 100) {
                 const batch = allMemIds.slice(i, i + 100);
-                const res = await fetch(base + '/v4/memories/forget-matching', {
-                    method: 'POST',
-                    headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
-                    body: JSON.stringify({ containerTag: tag, dryRun: false, threshold: 0, maxForget: batch.length, ids: batch }),
-                    signal: exec.signal,
-                });
-                if (res.ok) {
-                    const d = (await res.json()) as { count?: number };
+                try {
+                    const d = await apiFetch<{ count?: number }>(base, apiKey, '/v4/memories/forget-matching', {
+                        method: 'POST',
+                        body: { containerTag: tag, dryRun: false, threshold: 0, maxForget: batch.length, ids: batch },
+                        signal: exec.signal,
+                    });
                     memForgotten += d.count ?? 0;
                 }
+                catch { /* batch failed — keep going, deletion is best-effort */ }
             }
 
             // Step 3: Delete v3 documents via /v3/documents/bulk DELETE with JSON body.
             let docsDeleted = 0;
             for (let i = 0; i < docIds.length; i += 100) {
                 const batch = docIds.slice(i, i + 100);
-                const res = await fetch(base + '/v3/documents/bulk', {
-                    method: 'DELETE',
-                    headers: { authorization: 'Bearer ' + apiKey, 'content-type': 'application/json' },
-                    body: JSON.stringify({ ids: batch }),
-                    signal: exec.signal,
-                });
-                if (res.ok) {
-                    const d = (await res.json()) as { deletedCount?: number };
+                try {
+                    const d = await apiFetch<{ deletedCount?: number }>(base, apiKey, '/v3/documents/bulk', {
+                        method: 'DELETE',
+                        body: { ids: batch },
+                        signal: exec.signal,
+                    });
                     docsDeleted += d.deletedCount ?? 0;
                 }
+                catch { /* batch failed — keep going */ }
             }
 
             return {
