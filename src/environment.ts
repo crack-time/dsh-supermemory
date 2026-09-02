@@ -27,7 +27,7 @@
  *     with backoff instead of caching a dead fallback, and never blocks a
  *     render.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { release as osRelease, homedir } from 'node:os';
 import { execFile as execFileCb } from 'node:child_process';
@@ -159,7 +159,58 @@ const wslInFlight = new Map<string, Promise<WslProbe>>();
 const wslAttempting = new Set<string>();
 const wslAttempts = new Map<string, number>();
 
-/** Optional diagnostics hook (wired from the host apply()). */
+// ---------------------------------------------------------------------------
+// Persistent cache: a successful probe is cheap to re-derive, but cold-booting
+// a distro can take longer than the model likes to wait. Persist the last good
+// per-distro result to disk so a later host start still renders real data on
+// the very first step, even if the wsl.exe probe hasn't settled yet.
+// ---------------------------------------------------------------------------
+const CACHE_DIR = join(homedir(), '.dsh', 'supermemory');
+const CACHE_FILE = join(CACHE_DIR, 'wsl-env.json');
+
+/** Last known-good probes loaded from disk (by distro). */
+const wslPersisted = new Map<string, WslProbe>();
+
+function loadPersisted(): void {
+    try {
+        const text = readFileSync(CACHE_FILE, 'utf8');
+        const data = JSON.parse(text) as { distros?: Record<string, WslProbe> };
+        for (const [distro, probe] of Object.entries(data.distros ?? {})) {
+            if (probe && typeof probe === 'object' && isHealthy(probe)) {
+                wslPersisted.set(distro, probe);
+            }
+        }
+    } catch { /* no cache yet / unreadable */ }
+}
+loadPersisted();
+
+/** Write the current settled + persisted view to disk (best effort). */
+function persistCache(extra?: { distro?: string; error?: string }): void {
+    try {
+        mkdirSync(CACHE_DIR, { recursive: true });
+        const distros: Record<string, WslProbe & { updatedAt: string; lastError?: string }> = {};
+        const now = new Date().toISOString();
+        for (const [distro, probe] of wslSettled) {
+            if (!isHealthy(probe)) continue;
+            distros[distro] = { ...probe, updatedAt: now };
+        }
+        if (extra?.distro) {
+            const prev = wslSettled.get(extra.distro) ?? wslPersisted.get(extra.distro);
+            if (prev && isHealthy(prev)) {
+                distros[extra.distro] = {
+                    ...prev,
+                    updatedAt: now,
+                    ...(extra.error ? { lastError: extra.error } : {}),
+                };
+            }
+        }
+        writeFileSync(CACHE_FILE, JSON.stringify({ updatedAt: now, distros }, null, 2), 'utf8');
+    } catch { /* not writable — cache is best-effort only */ }
+}
+
+// ---------------------------------------------------------------------------
+// Optional diagnostics hook (wired from the host apply()).
+// ---------------------------------------------------------------------------
 let log: ((m: string) => void) | undefined;
 export function setProbeLog(fn?: (m: string) => void): void {
     log = fn;
@@ -251,7 +302,12 @@ function scheduleRetry(distro: string, attempt: number): void {
 /** Fire-and-forget a probe for one distro; never caches a dead fallback. */
 function startProbe(distro: string): void {
     if (!distro || wslInFlight.has(distro)) return;
-    if (wslSettled.has(distro)) return; // already have good data
+    if (wslSettled.has(distro)) return; // already have good data this process
+    // If a previous run cached good data for this distro, render from it now
+    // and refresh the live copy only once a fresh probe settles.
+    if (!wslSettled.has(distro) && isHealthy(wslPersisted.get(distro) ?? ({} as WslProbe))) {
+        wslSettled.set(distro, wslPersisted.get(distro)!);
+    }
     const attempt = (wslAttempts.get(distro) ?? 0) + 1;
     wslAttempts.set(distro, attempt);
     wslAttempting.add(distro);
@@ -260,8 +316,10 @@ function startProbe(distro: string): void {
         .then((probe) => {
             if (isHealthy(probe)) {
                 wslSettled.set(distro, probe);
+                wslPersisted.set(distro, probe);
+                persistCache();
                 wslAttempting.delete(distro);
-                log?.(`[supermemory:wsl-env] ${distro}: ${JSON.stringify({ osName: probe.osName, uv: probe.uv, shell: probe.shell, kernel: probe.kernel })}`);
+                log?.(`[supermemory:wsl-env] ${distro}: ${JSON.stringify({ osName: probe.osName, uv: probe.uv, python: probe.python, shell: probe.shell, kernel: probe.kernel })}`);
             } else {
                 log?.(`[supermemory:wsl-env] ${distro}: probe returned no signal, will retry`);
                 wslAttempting.delete(distro);
@@ -272,6 +330,9 @@ function startProbe(distro: string): void {
         .catch((err: unknown) => {
             const msg = err instanceof Error ? err.message : String(err);
             log?.(`[supermemory:wsl-env] ${distro}: probe failed (${msg}), will retry`);
+            if (isHealthy(wslPersisted.get(distro) ?? ({} as WslProbe))) {
+                persistCache({ distro, error: msg }); // keep old data, note the failure
+            }
             wslAttempting.delete(distro);
             scheduleRetry(distro, attempt);
             return { distro, shell: 'bash' } as WslProbe;
@@ -373,10 +434,13 @@ export function environmentBlock(ctx: Context, session: Session): string {
     let uv: string | undefined;
     if (isWslWorkspace(cwd)) {
         const distro = distroOf(cwd);
-        // fs layer gives real data synchronously; wsl.exe layer can refine it.
+        // fs layer gives real data synchronously; persisted cache and the live
+        // wsl.exe probe layer on top of it (later sources win).
         const fsProbe = probeWslFs(cwd);
-        const liveProbe = settledProbe(cwd);
-        const probe: WslProbe = { ...fsProbe, ...(liveProbe && isHealthy(liveProbe) ? liveProbe : {}) };
+        const liveProbe = settledProbe(cwd); // already seeded from disk if available
+        const persisted = wslPersisted.get(distro);
+        const probeLayers = [fsProbe, persisted, liveProbe].filter((p): p is WslProbe => Boolean(p));
+        const probe: WslProbe = Object.assign({}, ...probeLayers.map((p) => (isHealthy(p) ? p : {})));
         const probing = wslAttempting.has(distro) && !liveProbe;
 
         lines.push('Workspace:                WSL (' + distro + ')');
