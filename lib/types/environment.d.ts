@@ -13,33 +13,28 @@ export interface WslProbe {
     home?: string;
     /** $SHELL basename inside the distro, e.g. bash. */
     shell: string;
-    /** `command -v uv` result (or a well-known fallback), e.g. /home/crack/.local/bin/uv. */
+    /** `command -v uv` result (or a well-known fallback), e.g. /home/linuxbrew/.linuxbrew/bin/uv. */
     uv?: string;
     /** `command -v uvx` result. */
     uvx?: string;
     /** `command -v python3` result. */
     python?: string;
-    /** distro pretty name, e.g. "Ubuntu 22.04.4 LTS". */
+    /** distro pretty name, e.g. "Ubuntu 22.04.5 LTS". */
     osName?: string;
     /** Linux kernel release, e.g. 5.15.153.1-microsoft-standard-WSL2. */
     kernel?: string;
 }
 export declare function setProbeLog(fn?: (m: string) => void): void;
-/**
- * Pre-warm every installed distro on plugin activation so WSL environment
- * blocks render from settled data on the first model step of a WSL session.
- * No-op when WSL is unavailable or distros are gone.
- */
+/** Kick off – and if needed synchronously resolve – the WSL probe for a session.
+ *  Call from session/created so the render path stays non-blocking. */
+export declare function ensureWslProbe(session: Session): void;
+/** Pre-warm every installed distro on plugin activation (non-blocking). */
 export declare function prewarmWslProbes(): Promise<void>;
-/**
- * Kick off the WSL probe for a session (fire-and-forget, per distro). No-op
- * when the workspace is not WSL or the distro already has good data.
- */
-export declare function kickOffEnvironmentProbe(session: Session): void;
 /**
  * Dynamic environment block (top of the runtime context). Modeled after
  * Cursor's environment header: cwd, git state, platform, shell, OS, python.
  * Order 5 keeps it ABOVE every framework context (110+).
  * For WSL workspaces it reflects the Linux environment instead of win32.
+ * Pure read — no probes are triggered here.
  */
 export declare function environmentBlock(ctx: Context, session: Session): string;

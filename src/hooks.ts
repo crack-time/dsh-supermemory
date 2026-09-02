@@ -13,7 +13,7 @@ import type { SettingsScope } from '@deepseek-ai/dsh-settings';
 import { activeContainer, requireUpstream } from './config.ts';
 import { fetchProfile } from './containers.ts';
 import { turnTranscript } from './transcript.ts';
-import { environmentBlock, kickOffEnvironmentProbe } from './environment.ts';
+import { environmentBlock, ensureWslProbe } from './environment.ts';
 import { apiFetch } from './upstream.ts';
 
 // ---------------------------------------------------------------------------
@@ -305,14 +305,15 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
         sessionDocRef.delete(session.id);
     }));
 
-    // ── Session init: snapshot container + fetch profile into cache ─────
+    // ── Session init: warm WSL probe, snapshot container, fetch profile ──
     disposers.push(ctx.on('session/created', (session) => {
         if (isSubagent(session)) return;
+        // Warm the WSL environment probe NOW (synchronously, before the first
+        // model step renders the environment block) so the render path — which
+        // is pure read — already has real shell/uv/os data. No-op for non-WSL.
+        ensureWslProbe(session);
         void (async () => {
             try {
-                // Kick off the async WSL environment probe (fire-and-forget)
-                // so the environment block can report the distro's shell/uv.
-                kickOffEnvironmentProbe(session);
                 const recovered = recoverInjectedContainer(session);
                 const active = recovered ?? activeContainer(scope);
                 if (recovered) {

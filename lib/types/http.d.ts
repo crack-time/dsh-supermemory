@@ -8,8 +8,6 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
 import type { ManagedServer } from './managed-server.ts';
 export declare const API_PREFIX = "/plugins/@crack/dsh-supermemory/api";
-export declare function sendJson(res: ServerResponse, status: number, body: unknown): void;
-export declare function readBody(req: IncomingMessage): Promise<string>;
 /**
  * Mask an API key for client-facing responses: the settings card only needs
  * to know whether a key exists (and for the password field's display), never

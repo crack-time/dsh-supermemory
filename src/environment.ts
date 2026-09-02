@@ -8,8 +8,8 @@
  *   shell → ctx.shell executor constructor name (PwshLocalExecutor → pwsh),
  *           or the WSL shell when the workspace lives inside a WSL distro
  *   OS    → process.platform + os.release() (or the WSL distro for WSL workspaces)
- *   uv    → probed in well-known locations; for WSL workspaces it is
- *           resolved from the WSL side (fs share + wsl.exe), cached
+ *   uv    → probed in well-known locations; for WSL workspaces it is resolved
+ *           from the WSL side (fs share + wsl.exe), cached + persisted
  *
  * WSL workspaces are registered by dsh-wsl under a UNC share:
  *   \\wsl.localhost\<distro>\<linux-path>   (legacy: \\wsl$\<distro>\<linux-path>)
@@ -18,14 +18,18 @@
  * instead of the Windows host values — because from the host's point of view
  * `ctx.shell` is still the pwsh executor, which would be wrong to report.
  *
- * Reliability / immediacy:
- *   • `probeWslFs` reads the WSL filesystem share directly (no wsl.exe), so
- *     os-name / uv / python are available synchronously on the very first
- *     render as long as the host can open the \\wsl.localhost share.
- *   • `wsl.exe` probing is only used for the things the share can't give us
- *     (shell, kernel). It runs fire-and-forget, is cached per distro, retries
- *     with backoff instead of caching a dead fallback, and never blocks a
- *     render.
+ * WSL probe architecture (kept deliberately small — one manager, one resolve):
+ *   • probeWslFs — synchronous read of the \\wsl.localhost filesystem share
+ *     (os-release + uv/python candidate paths). Runs on every render: cheap,
+ *     immediate, and gives real data without wsl.exe.
+ *   • WslProbeManager — orchestrates the layers. Warm it at session creation
+ *     (`ensure`) and pre-warm at plugin activation (`prewarm`); the render
+ *     path only ever reads (`resolve`), it never blocks.
+ *     Layer precedence in resolve(): fs < persisted < live settled.
+ *     The one blocking action — `probeWslSync` (a synchronous wsl.exe call) —
+ *     runs at most once per distro per process, and its result is also written
+ *     to a persistent cache (~/.dsh/supermemory/wsl-env.json) so later host
+ *     starts render from disk on the very first step without re-probing.
  */
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -69,7 +73,7 @@ function uncToLinux(p: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Sync, non-blocking layer — read the WSL filesystem share directly
+// Sync, non-blocking fs layer — read the WSL filesystem share directly
 // ---------------------------------------------------------------------------
 
 /** like existsSync but never throws (denied / unreachable / bad path). */
@@ -96,12 +100,7 @@ function wslHomeCandidates(cwd: string): string[] {
     return [...homes];
 }
 
-/**
- * Synchronous best-effort probe read straight off the WSL filesystem share.
- * Needs no wsl.exe and no probe cache — call it on every render. Gives the
- * distro name, os-name, and uv/python locations the moment the share is
- * readable, so the first render already carries real data.
- */
+/** Synchronous best-effort probe read straight off the WSL filesystem share. */
 function probeWslFs(cwd: string): WslProbe {
     const probe: WslProbe = { distro: distroOf(cwd), shell: 'bash' };
     const prefix = cwd.match(WSL_PREFIX_RE)?.[1];
@@ -127,7 +126,7 @@ function probeWslFs(cwd: string): WslProbe {
 }
 
 // ---------------------------------------------------------------------------
-// WSL wsl.exe probe (async, one round-trip per distro, cached + retrying)
+// WSL wsl.exe probe (marker-line format — survives the Windows→WSL argv edge)
 // ---------------------------------------------------------------------------
 
 /** What we know about a WSL distro's toolchain. */
@@ -139,120 +138,21 @@ export interface WslProbe {
     home?: string;
     /** $SHELL basename inside the distro, e.g. bash. */
     shell: string;
-    /** `command -v uv` result (or a well-known fallback), e.g. /home/crack/.local/bin/uv. */
+    /** `command -v uv` result (or a well-known fallback), e.g. /home/linuxbrew/.linuxbrew/bin/uv. */
     uv?: string;
     /** `command -v uvx` result. */
     uvx?: string;
     /** `command -v python3` result. */
     python?: string;
-    /** distro pretty name, e.g. "Ubuntu 22.04.4 LTS". */
+    /** distro pretty name, e.g. "Ubuntu 22.04.5 LTS". */
     osName?: string;
     /** Linux kernel release, e.g. 5.15.153.1-microsoft-standard-WSL2. */
     kernel?: string;
 }
 
 /** A probe "carries signal" once it has any real toolchain/distro data. */
-function isHealthy(p: WslProbe): boolean {
-    return Boolean(p.osName || p.uv || p.uvx || p.python || p.kernel);
-}
-
-/** Settled healthy probes (by distro). */
-const wslSettled = new Map<string, WslProbe>();
-/** In-flight probes (by distro). */
-const wslInFlight = new Map<string, Promise<WslProbe>>();
-/** Probes currently being attempted (for the "(probing…)" render hint). */
-const wslAttempting = new Set<string>();
-const wslAttempts = new Map<string, number>();
-/** Distros we already attempted a synchronous first-render probe for. */
-const wslSyncProbed = new Set<string>();
-
-// ---------------------------------------------------------------------------
-// Persistent cache: a successful probe is cheap to re-derive, but cold-booting
-// a distro can take longer than the model likes to wait. Persist the last good
-// per-distro result to disk so a later host start still renders real data on
-// the very first step, even if the wsl.exe probe hasn't settled yet.
-// ---------------------------------------------------------------------------
-const CACHE_DIR = join(homedir(), '.dsh', 'supermemory');
-const CACHE_FILE = join(CACHE_DIR, 'wsl-env.json');
-
-/** Last known-good probes loaded from disk (by distro). */
-const wslPersisted = new Map<string, WslProbe>();
-
-function loadPersisted(): void {
-    try {
-        const text = readFileSync(CACHE_FILE, 'utf8');
-        const data = JSON.parse(text) as { distros?: Record<string, WslProbe> };
-        for (const [distro, probe] of Object.entries(data.distros ?? {})) {
-            if (probe && typeof probe === 'object' && isHealthy(probe)) {
-                wslPersisted.set(distro, probe);
-            }
-        }
-    } catch { /* no cache yet / unreadable */ }
-}
-loadPersisted();
-
-/** Write the current settled + persisted view to disk (best effort). */
-function persistCache(extra?: { distro?: string; error?: string }): void {
-    try {
-        mkdirSync(CACHE_DIR, { recursive: true });
-        const distros: Record<string, WslProbe & { updatedAt: string; lastError?: string }> = {};
-        const now = new Date().toISOString();
-        for (const [distro, probe] of wslSettled) {
-            if (!isHealthy(probe)) continue;
-            distros[distro] = { ...probe, updatedAt: now };
-        }
-        if (extra?.distro) {
-            const prev = wslSettled.get(extra.distro) ?? wslPersisted.get(extra.distro);
-            if (prev && isHealthy(prev)) {
-                distros[extra.distro] = {
-                    ...prev,
-                    updatedAt: now,
-                    ...(extra.error ? { lastError: extra.error } : {}),
-                };
-            }
-        }
-        writeFileSync(CACHE_FILE, JSON.stringify({ updatedAt: now, distros }, null, 2), 'utf8');
-    } catch { /* not writable — cache is best-effort only */ }
-}
-
-// ---------------------------------------------------------------------------
-// Optional diagnostics hook (wired from the host apply()).
-// ---------------------------------------------------------------------------
-let log: ((m: string) => void) | undefined;
-export function setProbeLog(fn?: (m: string) => void): void {
-    log = fn;
-}
-
-/** Run one non-interactive bash command inside a distro and resolve with stdout. */
-async function wslBash(distro: string, script: string): Promise<string> {
-    const { stdout } = await execFile(
-        'wsl.exe',
-        ['-d', distro, '--', 'bash', '-lc', script],
-        { encoding: 'utf8', windowsHide: true, maxBuffer: 4 * 1024 * 1024, timeout: 120_000 },
-    );
-    return stdout;
-}
-
-/** Enumerate installed WSL distros (order preserved; defaults first).
- *  wsl.exe writes the listing as UTF-16LE, so sniff the encoding. */
-async function listDistros(): Promise<string[]> {
-    const { stdout } = await execFile('wsl.exe', ['-l', '-q'], {
-        encoding: 'buffer',
-        windowsHide: true,
-        maxBuffer: 1024 * 1024,
-        timeout: 20_000,
-    });
-    const buf = stdout as Buffer;
-    let text: string;
-    if (buf.length >= 2 && (buf.readUInt16LE(0) === 0xfeff || buf.indexOf(0) !== -1)) {
-        text = buf.toString('utf16le').replace(/^\uFEFF/, '');
-    } else {
-        text = buf.toString('utf8');
-    }
-    return text
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0 && line !== '*');
+function isHealthy(p?: WslProbe): boolean {
+    return Boolean(p && (p.osName || p.uv || p.uvx || p.python || p.kernel));
 }
 
 /** The bash one-liner used to probe a distro.
@@ -314,18 +214,25 @@ function cleanOsName(line: string): string | undefined {
     return stripped || undefined;
 }
 
-/** Asynchronous probe (used for warming / refresh). */
-async function probeWsl(distro: string): Promise<WslProbe> {
-    const out = await wslBash(distro, probeScript());
-    return parseProbe(distro, out);
+/** Run one non-interactive bash command inside a distro; resolve with stdout. */
+async function wslBash(distro: string, script: string): Promise<string> {
+    const { stdout } = await execFile(
+        'wsl.exe',
+        ['-d', distro, '--', 'bash', '-lc', script],
+        { encoding: 'utf8', windowsHide: true, maxBuffer: 4 * 1024 * 1024, timeout: 30_000 },
+    );
+    return stdout;
 }
 
-/**
- * Synchronous probe — runs `wsl.exe` and blocks the current task up to a few
- * seconds. Cache-and-store on success. Used on the very first WSL render so a
- * brand-new conversation sees real shell/uv/os data even though the prewarm
- * probe hasn't settled yet. Returns the probe, or undefined when it fails.
- */
+/** Asynchronous probe (used for non-blocking refresh / pre-warm). */
+async function probeWsl(distro: string): Promise<WslProbe | undefined> {
+    try {
+        return parseProbe(distro, await wslBash(distro, probeScript()));
+    } catch { return undefined; }
+}
+
+/** Synchronous probe — blocks the current task up to a few seconds. Caches +
+ *  persists on success. Returns the probe or undefined when it fails. */
 function probeWslSync(distro: string): WslProbe | undefined {
     try {
         const out = execFileSync(
@@ -334,101 +241,160 @@ function probeWslSync(distro: string): WslProbe | undefined {
             { encoding: 'utf8', windowsHide: true, timeout: 20_000, maxBuffer: 4 * 1024 * 1024 },
         );
         const probe = parseProbe(distro, String(out));
-        if (!isHealthy(probe)) return undefined;
-        wslSettled.set(distro, probe);
-        wslPersisted.set(distro, probe);
-        persistCache();
-        return probe;
+        return isHealthy(probe) ? probe : undefined;
     } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        log?.(`[supermemory:wsl-env] ${distro}: sync probe failed (${msg})`);
+        log?.(`[supermemory:wsl-env] ${distro}: sync probe failed (${err instanceof Error ? err.message : err})`);
         return undefined;
     }
 }
 
-/** Schedule a retry with linear backoff (5s,10s,15s… capped at 60s). */
-function scheduleRetry(distro: string, attempt: number): void {
-    if (attempt >= 6) {
-        log?.(`[supermemory:wsl-env] ${distro}: giving up auto-retry after ${attempt} attempts`);
-        return;
+/** Enumerate installed WSL distros (order preserved; defaults first).
+ *  wsl.exe writes the listing as UTF-16LE, so sniff the encoding. */
+async function listDistros(): Promise<string[]> {
+    const { stdout } = await execFile('wsl.exe', ['-l', '-q'], {
+        encoding: 'buffer',
+        windowsHide: true,
+        maxBuffer: 1024 * 1024,
+        timeout: 20_000,
+    });
+    const buf = stdout as Buffer;
+    let text: string;
+    if (buf.length >= 2 && (buf.readUInt16LE(0) === 0xfeff || buf.indexOf(0) !== -1)) {
+        text = buf.toString('utf16le').replace(/^\uFEFF/, '');
+    } else {
+        text = buf.toString('utf8');
     }
-    setTimeout(() => startProbe(distro), Math.min(5000 * attempt, 60_000));
+    return text
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0 && line !== '*');
 }
 
-/** Fire-and-forget a probe for one distro; never caches a dead fallback. */
-function startProbe(distro: string): void {
-    if (!distro || wslInFlight.has(distro)) return;
-    if (wslSettled.has(distro)) return; // already have good data this process
-    // If a previous run cached good data for this distro, render from it now
-    // and refresh the live copy only once a fresh probe settles.
-    if (!wslSettled.has(distro) && isHealthy(wslPersisted.get(distro) ?? ({} as WslProbe))) {
-        wslSettled.set(distro, wslPersisted.get(distro)!);
-    }
-    const attempt = (wslAttempts.get(distro) ?? 0) + 1;
-    wslAttempts.set(distro, attempt);
-    wslAttempting.add(distro);
-    log?.(`[supermemory:wsl-env] probing ${distro} (attempt ${attempt})`);
-    const promise = probeWsl(distro)
-        .then((probe) => {
-            if (isHealthy(probe)) {
-                wslSettled.set(distro, probe);
-                wslPersisted.set(distro, probe);
-                persistCache();
-                wslAttempting.delete(distro);
-                log?.(`[supermemory:wsl-env] ${distro}: ${JSON.stringify({ osName: probe.osName, uv: probe.uv, python: probe.python, shell: probe.shell, kernel: probe.kernel })}`);
-            } else {
-                log?.(`[supermemory:wsl-env] ${distro}: probe returned no signal, will retry`);
-                wslAttempting.delete(distro);
-                scheduleRetry(distro, attempt);
+// ---------------------------------------------------------------------------
+// WslProbeManager — orchestration (single place that owns probe state)
+// ---------------------------------------------------------------------------
+
+/** Persistent cache location (also serves as a diagnostics surface). */
+const CACHE_DIR = join(homedir(), '.dsh', 'supermemory');
+const CACHE_FILE = join(CACHE_DIR, 'wsl-env.json');
+
+/** Optional diagnostics hook (wired from the host apply()). */
+let log: ((m: string) => void) | undefined;
+export function setProbeLog(fn?: (m: string) => void): void {
+    log = fn;
+}
+
+class WslProbeManager {
+    /** Live healthy probes for this process (by distro). */
+    private readonly settled = new Map<string, WslProbe>();
+    /** Last known-good probes loaded from disk (by distro). */
+    private readonly persisted = new Map<string, WslProbe>();
+    /** Async refreshes in flight (by distro). */
+    private readonly inflight = new Map<string, Promise<void>>();
+    /** Distros already given the blocking sync probe this process. */
+    private readonly syncDone = new Set<string>();
+
+    constructor() {
+        try {
+            const data = JSON.parse(readFileSync(CACHE_FILE, 'utf8')) as
+                | { distros?: Record<string, WslProbe> }
+                | undefined;
+            for (const [distro, probe] of Object.entries(data?.distros ?? {})) {
+                if (isHealthy(probe)) this.persisted.set(distro, probe);
             }
-            return probe;
-        })
-        .catch((err: unknown) => {
-            const msg = err instanceof Error ? err.message : String(err);
-            log?.(`[supermemory:wsl-env] ${distro}: probe failed (${msg}), will retry`);
-            if (isHealthy(wslPersisted.get(distro) ?? ({} as WslProbe))) {
-                persistCache({ distro, error: msg }); // keep old data, note the failure
-            }
-            wslAttempting.delete(distro);
-            scheduleRetry(distro, attempt);
-            return { distro, shell: 'bash' } as WslProbe;
-        })
-        .finally(() => {
-            wslInFlight.delete(distro);
-        });
-    wslInFlight.set(distro, promise);
-}
-
-/**
- * Pre-warm every installed distro on plugin activation so WSL environment
- * blocks render from settled data on the first model step of a WSL session.
- * No-op when WSL is unavailable or distros are gone.
- */
-export async function prewarmWslProbes(): Promise<void> {
-    let distros: string[];
-    try {
-        distros = await listDistros();
-    } catch {
-        return; // wsl.exe unavailable / WSL not installed — fs-only layer still works
+        } catch { /* no cache yet / unreadable */ }
     }
-    for (const distro of distros) startProbe(distro);
+
+    /** True while an async refresh is running and there is no live data yet. */
+    isProbing(distro: string): boolean {
+        return this.inflight.has(distro) && !isHealthy(this.settled.get(distro));
+    }
+
+    /**
+     * Resolve the best-known probe for a distro. PURE READ — never blocks,
+     * never triggers I/O beyond the cheap fs layer. Layer precedence:
+     *   fs (synchronous share read) < persisted (disk) < settled (live).
+     * Only healthy layers contribute, so a partial probe still improves output.
+     */
+    resolve(distro: string, cwd: string): WslProbe {
+        const layers = [probeWslFs(cwd), this.persisted.get(distro), this.settled.get(distro)]
+            .filter((p): p is WslProbe => isHealthy(p));
+        return Object.assign({}, ...layers);
+    }
+
+    /** Write the settled + persisted view to disk (best effort). */
+    private persist(): void {
+        try {
+            mkdirSync(CACHE_DIR, { recursive: true });
+            const now = new Date().toISOString();
+            const distros: Record<string, WslProbe & { updatedAt: string }> = {};
+            for (const [distro, probe] of this.settled) {
+                if (isHealthy(probe)) distros[distro] = { ...probe, updatedAt: now };
+            }
+            writeFileSync(CACHE_FILE, JSON.stringify({ updatedAt: now, distros }, null, 2), 'utf8');
+        } catch { /* not writable — cache is best-effort only */ }
+    }
+
+    /** Non-blocking async refresh: probe in the background, cache on success. */
+    private refreshAsync(distro: string): void {
+        if (this.inflight.has(distro)) return;
+        const job = probeWsl(distro)
+            .then((probe) => {
+                if (probe && isHealthy(probe)) {
+                    this.settled.set(distro, probe);
+                    this.persisted.set(distro, probe);
+                    this.persist();
+                    log?.(`[supermemory:wsl-env] ${distro}: ${JSON.stringify({ osName: probe.osName, uv: probe.uv, shell: probe.shell })}`);
+                }
+            })
+            .catch(() => { /* refresh is best-effort */ })
+            .finally(() => { this.inflight.delete(distro); });
+        this.inflight.set(distro, job);
+    }
+
+    /**
+     * Warm a distro so a subsequent render has real data. Called during session
+     * creation (NOT from the render path). The blocking sync probe runs at most
+     * once per distro per process; everything else is non-blocking:
+     *   - live data already present → nothing.
+     *   - persisted data present → seed it live, then refresh async.
+     *   - otherwise → one sync probe (cached + persisted), fall back to refresh.
+     */
+    ensure(distro: string): void {
+        if (!distro) return;
+        if (isHealthy(this.settled.get(distro))) return;
+        if (this.syncDone.has(distro)) {
+            this.refreshAsync(distro);
+            return;
+        }
+        this.syncDone.add(distro);
+        const persisted = this.persisted.get(distro);
+        if (persisted && isHealthy(persisted)) this.settled.set(distro, persisted); // render-ready immediately
+        const probe = probeWslSync(distro); // blocking, once per process
+        if (probe) {
+            this.settled.set(distro, probe);
+            this.persisted.set(distro, probe);
+            this.persist();
+            log?.(`[supermemory:wsl-env] ${distro}: ${JSON.stringify({ osName: probe.osName, uv: probe.uv, shell: probe.shell })}`);
+        } else {
+            this.refreshAsync(distro);
+        }
+    }
+
+    /** Pre-warm every installed distro (plugin activation, non-blocking). */
+    async prewarm(): Promise<void> {
+        let distros: string[];
+        try {
+            distros = await listDistros();
+        } catch {
+            return; // wsl.exe unavailable / WSL not installed — fs layer still works
+        }
+        for (const distro of distros) this.refreshAsync(distro);
+    }
 }
 
-/**
- * Kick off the WSL probe for a session (fire-and-forget, per distro). No-op
- * when the workspace is not WSL or the distro already has good data.
- */
-export function kickOffEnvironmentProbe(session: Session): void {
-    const cwd = session.header?.cwd ?? '';
-    if (!isWslWorkspace(cwd)) return;
-    startProbe(distroOf(cwd));
-}
-
-/** Best settled probe for a WSL cwd (fs layer always available before it). */
-function settledProbe(cwd: string): WslProbe | undefined {
-    if (!isWslWorkspace(cwd)) return undefined;
-    return wslSettled.get(distroOf(cwd));
-}
+/** Singleton used by the environment block + the session/created hook. */
+const wslEnv = new WslProbeManager();
 
 // ---------------------------------------------------------------------------
 // Windows-host detection (non-WSL workspaces)
@@ -471,6 +437,23 @@ function shellName(ctx: Context): string {
 }
 
 // ---------------------------------------------------------------------------
+// Public helpers (wired from hooks.ts / index.ts)
+// ---------------------------------------------------------------------------
+
+/** Kick off – and if needed synchronously resolve – the WSL probe for a session.
+ *  Call from session/created so the render path stays non-blocking. */
+export function ensureWslProbe(session: Session): void {
+    const cwd = session.header?.cwd ?? '';
+    if (!isWslWorkspace(cwd)) return;
+    wslEnv.ensure(distroOf(cwd));
+}
+
+/** Pre-warm every installed distro on plugin activation (non-blocking). */
+export async function prewarmWslProbes(): Promise<void> {
+    await wslEnv.prewarm();
+}
+
+// ---------------------------------------------------------------------------
 // Render
 // ---------------------------------------------------------------------------
 
@@ -479,6 +462,7 @@ function shellName(ctx: Context): string {
  * Cursor's environment header: cwd, git state, platform, shell, OS, python.
  * Order 5 keeps it ABOVE every framework context (110+).
  * For WSL workspaces it reflects the Linux environment instead of win32.
+ * Pure read — no probes are triggered here.
  */
 export function environmentBlock(ctx: Context, session: Session): string {
     const cwd = session.header?.cwd ?? process.cwd();
@@ -490,27 +474,8 @@ export function environmentBlock(ctx: Context, session: Session): string {
     let uv: string | undefined;
     if (isWslWorkspace(cwd)) {
         const distro = distroOf(cwd);
-        // First render of a brand-new conversation: the prewarm probe is async
-        // and won't have settled yet. If we have no usable data (not settled,
-        // not persisted, nothing in flight), run one synchronous wsl.exe probe
-        // so shell/uv/os render immediately instead of placeholders. Only once
-        // per distro per process — a failing sync probe must not block later.
-        if (!wslSettled.has(distro)
-            && !wslInFlight.has(distro)
-            && !wslAttempting.has(distro)
-            && !wslSyncProbed.has(distro)
-            && !(isHealthy(wslPersisted.get(distro) ?? ({} as WslProbe)))) {
-            wslSyncProbed.add(distro);
-            probeWslSync(distro);
-        }
-        // fs layer gives real data synchronously; persisted cache and the live
-        // wsl.exe probe layer on top of it (later sources win).
-        const fsProbe = probeWslFs(cwd);
-        const liveProbe = settledProbe(cwd); // already seeded from disk if available
-        const persisted = wslPersisted.get(distro);
-        const probeLayers = [fsProbe, persisted, liveProbe].filter((p): p is WslProbe => Boolean(p));
-        const probe: WslProbe = Object.assign({}, ...probeLayers.map((p) => (isHealthy(p) ? p : {})));
-        const probing = wslAttempting.has(distro) && !liveProbe;
+        const probe = wslEnv.resolve(distro, cwd);
+        const probing = wslEnv.isProbing(distro) && !probe.kernel;
 
         lines.push('Workspace:                WSL (' + distro + ')');
         lines.push('Platform:                 wsl (' + process.platform + ' host)');
