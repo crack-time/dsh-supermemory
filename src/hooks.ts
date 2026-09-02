@@ -109,7 +109,7 @@ const sessionProfileCache = new Map<string, string>();
  * event log (first few events after session creation).
  */
 function recoverInjectedContainer(session: Session): string | undefined {
-    const events = session.events;
+    const events = session.snapshotEvents();
     for (let i = 0; i < events.length; i += 1) {
         const e = events[i];
         if (!e) continue;

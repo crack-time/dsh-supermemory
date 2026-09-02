@@ -7,7 +7,6 @@
  * imports back.
  */
 import z from '@deepseek-ai/schemastery';
-import { settingsNamespace } from '@deepseek-ai/dsh-settings';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
 import type { Context } from '@deepseek-ai/cordis';
 
@@ -98,7 +97,7 @@ export function argString(value: unknown, fallback: string): string {
 
 /** Create the settings scope for the "supermemory" namespace (live applies). */
 export function registerSupermemorySettings(ctx: Context): SettingsScope<any> {
-    return ctx.settings.register(settingsNamespace('supermemory'), SUPERMEMORY_SCHEMA, {
+    return ctx.settings.register('supermemory', SUPERMEMORY_SCHEMA, {
         applies: 'live',
     });
 }

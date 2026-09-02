@@ -29,7 +29,7 @@ function messageText(content: readonly unknown[]): string {
  * O(this turn events) rather than O(all events) for long sessions.
  */
 export function turnTranscript(session: Session, turn: number, maxChars = 6000): string {
-    const events = session.events;
+    const events = session.snapshotEvents();
     let start = -1;
     for (let i = events.length - 1; i >= 0; i -= 1) {
         const e = events[i];

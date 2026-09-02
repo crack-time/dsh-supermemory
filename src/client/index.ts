@@ -8,48 +8,13 @@
  * own bundled dashboard (localhost:6767); this plugin only makes that
  * server reachable through dsh's own origin.
  */
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
+import type { Context as ClientContext } from '@deepseek-ai/cordis';
 import { SupermemorySettingsCard } from './card.tsx';
 import { MemorySpaceBadge } from './header-badge.tsx';
 import { MemorySelector } from './memory-selector.tsx';
 import { CARD_LOCALE } from './card-locale.ts';
 import { injectCardCss } from './card-css.ts';
 import { API_URLS } from './api.ts';
-
-/**
- * Local declaration merging for the seats this plugin occupies.
- *
- * The real services are declared by the dsh web shell at runtime
- * (dsh-client-locale's `ctx.locale`, dsh-client-ui-settings-plugins'
- * `settings.plugin.item` keyed slot, dsh-client-ui-conversation's
- * `conversation.session.header.actions` list slot). Those packages are
- * NOT build-time dependencies of this plugin, so we mirror just the faces
- * we touch — the slot keys, their owners, and our locale namespace.
- */
-declare module '@deepseek-ai/dsh-client-ui-slots' {
-    interface SlotMap {
-        /** One plugin's card inside the plugin configuration section. */
-        'settings.plugin.item': {
-            kind: 'keyed';
-            scope: 'root';
-            owner: { children?: never };
-        };
-        /** Badge chip in the session header (next to the agent-preset label). */
-        'conversation.session.header.actions': {
-            kind: 'list';
-            scope: 'session';
-        };
-        /** Memory selector in the input bar (next to model selector). */
-        'conversation.input.right': {
-            kind: 'list';
-            scope: 'session';
-        };
-    }
-    interface LocaleNamespaceMap {
-        /** Card copy namespace (keys in card-locale.ts). */
-        'dsh-supermemory': keyof typeof CARD_LOCALE.zh;
-    }
-}
 
 type LocaleRuntime = {
     register(namespace: string, dict: Record<string, Record<string, string>>): void | Promise<void>;
@@ -72,7 +37,9 @@ export function apply(ctx: ClientContext) {
     injectCardCss();
     // Locale dictionary for the card (title / description / labels / hints).
     ctx.locale?.register?.(DICT, CARD_LOCALE);
-    const slots = ctx.slots;
+    // Alpha.4 obtains client services through ctx.get('…'); slots are typed
+    // loosely (the slot definitions below carry their own runtime contract).
+    const slots = ctx.get('slots') as any;
 
     // ── Header badge: shows the active memory container name ──────────
     // Registers into the session header actions list so it renders as a
