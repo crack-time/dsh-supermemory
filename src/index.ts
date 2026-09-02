@@ -26,7 +26,7 @@ import { ManagedServer } from './managed-server.ts';
 import { handleApi, API_PREFIX } from './http.ts';
 import { registerMemoryTools } from './tools/index.ts';
 import { registerSessionHooks } from './hooks.ts';
-import { prewarmWslProbes } from './environment.ts';
+import { prewarmWslProbes, setProbeLog } from './environment.ts';
 
 /** Required services: the web route registry, the user-settings seam, the tool registry, the workspace resolver, the prompt-context system and the shell executor. */
 const inject = ['webServer', 'settings', 'tools', 'workspaceRegistry', 'systemPrompt', 'shell'];
@@ -42,6 +42,8 @@ function apply(ctx: Context): void {
         // Start (or adopt) the managed server when this plugin activates —
         // i.e. when dsh web boots and loads the plugin.
         void managed.sync(scope, ctx);
+        // Route WSL probe diagnostics to the host logger.
+        setProbeLog((msg) => ctx.logger.debug(msg));
         // Pre-warm the WSL environment probes so the injected environment block
         // has settled per-distro data ready for the first model step of a WSL
         // workspace (fire-and-forget; no-ops when WSL is unavailable).

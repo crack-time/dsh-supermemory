@@ -24,16 +24,16 @@ export interface WslProbe {
     /** Linux kernel release, e.g. 5.15.153.1-microsoft-standard-WSL2. */
     kernel?: string;
 }
+export declare function setProbeLog(fn?: (m: string) => void): void;
 /**
  * Pre-warm every installed distro on plugin activation so WSL environment
- * blocks render from settled data (not the placeholder) on the first model
- * step of a WSL session. No-op when WSL is unavailable or distros are gone.
+ * blocks render from settled data on the first model step of a WSL session.
+ * No-op when WSL is unavailable or distros are gone.
  */
 export declare function prewarmWslProbes(): Promise<void>;
 /**
- * Kick off the WSL probe for a session (fire-and-forget, once per distro).
- * Safe to call for every session — no-ops otherwise. Resolves into `wslSettled`
- * so the synchronous environment renderer can read it without awaiting.
+ * Kick off the WSL probe for a session (fire-and-forget, per distro). No-op
+ * when the workspace is not WSL or the distro already has good data.
  */
 export declare function kickOffEnvironmentProbe(session: Session): void;
 /**
