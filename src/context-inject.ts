@@ -52,8 +52,7 @@ export function staticContextText(
     const banner = profile
         ? '[Memory Context (from local supermemory)]\n\n' +
           'Active memory space: ' + container + '\n\n' +
-          profile +
-          '\n\n[SYSTEM INSTRUCTION] Memory queries default to the active memory space above.'
+          profile
         : '';
     return [env, banner].filter((s) => s.length > 0).join('\n\n');
 }
@@ -236,10 +235,12 @@ export function registerMemoryContexts(
         },
     }));
 
-    // Dynamic recall — evaluated on every assembly, native-step timing.
+    // Dynamic recall — right after the static context (order 6), so the
+    // retrieved memories read immediately after the profile, before any of the
+    // native sandbox/approval sections. Evaluated on every assembly.
     disposers.push(scopedCtx.systemPrompt.context({
         name: 'supermemory:recall',
-        order: 210,
+        order: 6,
         text: (ctx) => {
             const session = ctx.agent?.session;
             if (!session || isSubagent(session)) return '';
