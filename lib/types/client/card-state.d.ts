@@ -9,6 +9,7 @@ export interface CardState {
     activeContainer: string;
     recallEnabled: boolean;
     recallTopK: number;
+    recallThreshold: number;
 }
 export interface ManagedStatus {
     enabled?: boolean;
@@ -45,6 +46,7 @@ export declare function useSupermemoryCard(deps: CardHookDeps): {
     openaiModel: string;
     recallEnabled: boolean;
     recallTopK: number;
+    recallThreshold: number;
     managed: ManagedStatus | null;
     server: CardState | null;
     saving: boolean;
@@ -64,6 +66,7 @@ export declare function useSupermemoryCard(deps: CardHookDeps): {
     setOpenaiModel: import("react").Dispatch<import("react").SetStateAction<string>>;
     setRecallEnabled: import("react").Dispatch<import("react").SetStateAction<boolean>>;
     setRecallTopK: import("react").Dispatch<import("react").SetStateAction<number>>;
+    setRecallThreshold: import("react").Dispatch<import("react").SetStateAction<number>>;
     setManaged: import("react").Dispatch<import("react").SetStateAction<ManagedStatus | null>>;
     setSaving: import("react").Dispatch<import("react").SetStateAction<boolean>>;
     setSaveFailed: import("react").Dispatch<import("react").SetStateAction<boolean>>;

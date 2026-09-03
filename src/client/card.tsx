@@ -51,11 +51,12 @@ export function SupermemorySettingsCard(props: CardProps) {
 
     const {
         open, baseUrl, apiKey, serverPath, openaiApiKey, openaiBaseUrl,
-        openaiModel, recallEnabled, recallTopK, managed, server,
+        openaiModel, recallEnabled, recallTopK, recallThreshold, managed, server,
         saving, saveFailed, justSaved, testing, status, loadErr,
         dirty, mgtText,
         setOpen, setBaseUrl, setApiKey, setServerPath, setOpenaiApiKey,
         setOpenaiBaseUrl, setOpenaiModel, setRecallEnabled, setRecallTopK,
+        setRecallThreshold,
         setSaveFailed, commit, runTest,
     } = useSupermemoryCard({ t: txt, applyPatch });
 
@@ -168,6 +169,18 @@ export function SupermemorySettingsCard(props: CardProps) {
                             onChange={(e) => setRecallTopK(Number(e.target.value))}
                         />
                         <span className="sm-settings-hint">{txt('recallTopKHint')}</span>
+                    </label>
+                    <label className="sm-settings-row">
+                        <span className="sm-settings-label">{txt('recallThreshold')}</span>
+                        <input
+                            type="number"
+                            min={0}
+                            max={1}
+                            step={0.05}
+                            value={recallThreshold}
+                            onChange={(e) => setRecallThreshold(Number(e.target.value))}
+                        />
+                        <span className="sm-settings-hint">{txt('recallThresholdHint')}</span>
                     </label>
 
                     <div className="sm-settings-serverrow">

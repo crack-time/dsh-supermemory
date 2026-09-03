@@ -50,6 +50,8 @@ export declare const CARD_LOCALE: {
         recallEnabledHint: string;
         recallTopK: string;
         recallTopKHint: string;
+        recallThreshold: string;
+        recallThresholdHint: string;
         loadingContainers: string;
         noContainers: string;
         createNew: string;
@@ -99,6 +101,8 @@ export declare const CARD_LOCALE: {
         recallEnabledHint: string;
         recallTopK: string;
         recallTopKHint: string;
+        recallThreshold: string;
+        recallThresholdHint: string;
         loadingContainers: string;
         noContainers: string;
         createNew: string;
