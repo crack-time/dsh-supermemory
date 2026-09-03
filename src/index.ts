@@ -13,7 +13,9 @@
  *   containers.ts      container discovery + profile fetch
  *   tools/              memory tools (search, crud, list, audit + barrel index)
  *   upstream.ts         shared authenticated HTTP + pagination helpers
- *   hooks.ts           systemPrompt.context() registration + turn persistence
+ *   hooks.ts           session hooks: static-context injection + turn persistence
+ *   context-inject.ts  the plugin's own user/message context channel (static
+ *                      environment+profile block + per-message dynamic recall)
  */
 // Type-only imports: they only load the declaration merging into the cordis
 // Context (`ctx.webServer` here); erased at compile time, zero runtime cost.
@@ -29,7 +31,7 @@ import { registerSessionHooks } from './hooks.ts';
 import { prewarmWslProbes, setProbeLog } from './environment.ts';
 
 /** Required services: the web route registry, the user-settings seam, the tool registry, the workspace resolver, the prompt-context system and the shell executor. */
-const inject = ['webServer', 'settings', 'tools', 'workspaceRegistry', 'systemPrompt', 'shell'];
+const inject = ['webServer', 'settings', 'tools', 'workspaceRegistry', 'shell'];
 
 function apply(ctx: Context): void {
     // "supermemory" settings namespace: dsh rc.7 renders it as a settings card
