@@ -5,6 +5,7 @@ import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
 import { activeContainer, argString, requireUpstream } from '../config.ts';
 import { apiFetch } from '../upstream.ts';
+import { filterSearchHits } from '../recall.ts';
 
 /**
  * supersonic semantic search tool: model-facing recall over the local
@@ -75,16 +76,15 @@ export function makeSearchTool(scope: SettingsScope<any>): ToolDefinition {
             const limit = Math.min(20, Math.max(1, raw));
             const { base, apiKey } = requireUpstream(scope);
             const data = await apiFetch<{
-                memories?: Array<{ memory?: string }>;
-                results?: Array<{ memory?: string }>;
+                memories?: Array<unknown>;
+                results?: Array<unknown>;
             }>(base, apiKey, '/v4/search', {
                 method: 'POST',
                 body: { q: query, containerTag: tag, threshold: 0.5, limit },
                 signal: exec.signal,
             });
-            const results = (data.memories ?? data.results ?? [])
-                .map((m) => ({ memory: m.memory ?? '' }))
-                .filter((m) => m.memory.length > 0);
+            // De-duplicate by rootMemoryId + drop low-relevance hits.
+            const results = filterSearchHits(data.results ?? data.memories ?? [], 0.5).slice(0, limit);
             return { results };
         },
         timeoutMs: 30000,

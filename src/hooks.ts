@@ -21,7 +21,7 @@ import { messageText, turnTranscript } from './transcript.ts';
 import { environmentBlock, ensureWslProbe } from './environment.ts';
 import { SearchWorker } from './search-worker.ts';
 import { apiFetch } from './upstream.ts';
-import { recallSignature, renderRecall } from './recall.ts';
+import { recallSignature, renderRecall, filterSearchHits } from './recall.ts';
 
 /** One persistent search worker shared by every session (spawned on first use). */
 const searchWorker = new SearchWorker();
@@ -321,10 +321,11 @@ function recallSearchSync(
 ): Array<{ memory: string }> {
     try {
         const { base, apiKey } = requireUpstream(scope);
+        const threshold = resolveConfig(scope).recallThreshold;
         try {
-            return searchWorker.search(base, apiKey, query, container, limit);
+            return searchWorker.search(base, apiKey, query, container, limit, threshold);
         } catch {
-            return recallSearchExec(base, apiKey, query, container, limit);
+            return recallSearchExec(base, apiKey, query, container, limit, threshold);
         }
     } catch { /* no key / upstream unreachable — silently skip recall */ }
     return [];
@@ -337,6 +338,7 @@ function recallSearchExec(
     query: string,
     container: string,
     limit: number,
+    threshold: number,
 ): Array<{ memory: string }> {
     try {
         const script =
@@ -347,7 +349,7 @@ function recallSearchExec(
             '    const r = await fetch(base + "/v4/search", {\n' +
             '      method: "POST",\n' +
             '      headers: { authorization: "Bearer " + key, "content-type": "application/json" },\n' +
-            '      body: JSON.stringify({ q: process.env.SM_Q, containerTag: process.env.SM_CONTAINER, threshold: 0.5, limit: +process.env.SM_LIMIT })\n' +
+            '      body: JSON.stringify({ q: process.env.SM_Q, containerTag: process.env.SM_CONTAINER, threshold: +process.env.SM_THRESHOLD, limit: +process.env.SM_LIMIT })\n' +
             '    });\n' +
             '    process.stdout.write(await r.text());\n' +
             '  } catch (e) { process.exitCode = 1; }\n' +
@@ -360,6 +362,7 @@ function recallSearchExec(
                 SM_Q: query,
                 SM_CONTAINER: container,
                 SM_LIMIT: String(limit),
+                SM_THRESHOLD: String(threshold),
             },
             encoding: 'utf8',
             timeout: 8000,
@@ -367,12 +370,10 @@ function recallSearchExec(
             maxBuffer: 4 * 1024 * 1024,
         });
         const data = JSON.parse(out) as {
-            memories?: Array<{ memory?: string }>;
-            results?: Array<{ memory?: string }>;
+            memories?: Array<unknown>;
+            results?: Array<unknown>;
         };
-        return (data.memories ?? data.results ?? [])
-            .map((m) => ({ memory: m.memory ?? '' }))
-            .filter((m) => m.memory.length > 0);
+        return filterSearchHits(data.results ?? data.memories ?? [], threshold);
     } catch { /* upstream down / timeout — silently skip recall for this message */ }
     return [];
 }

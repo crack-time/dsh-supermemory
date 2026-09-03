@@ -20,6 +20,7 @@ interface SearchRequest {
     query: string;
     container: string;
     limit: number;
+    threshold?: number;
 }
 
 parentPort?.on('message', (req: SearchRequest) => {
@@ -32,7 +33,7 @@ parentPort?.on('message', (req: SearchRequest) => {
             const res = await fetch(req.base + '/v4/search', {
                 method: 'POST',
                 headers: { authorization: 'Bearer ' + req.apiKey, 'content-type': 'application/json' },
-                body: JSON.stringify({ q: req.query, containerTag: req.container, threshold: 0.5, limit: req.limit }),
+                body: JSON.stringify({ q: req.query, containerTag: req.container, threshold: req.threshold ?? 0.5, limit: req.limit }),
             });
             const text = await res.text();
             const buf = Buffer.from(text, 'utf8');

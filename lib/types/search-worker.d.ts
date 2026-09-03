@@ -10,6 +10,6 @@ export declare class SearchWorker {
      * while the worker performs the fetch. Returns the hits, or throws on a
      * hard failure (worker gone / error state) so the caller can fall back.
      */
-    search(base: string, apiKey: string, query: string, container: string, limit: number, timeoutMs?: number): SearchHit[];
+    search(base: string, apiKey: string, query: string, container: string, limit: number, threshold?: number, timeoutMs?: number): SearchHit[];
     dispose(): void;
 }

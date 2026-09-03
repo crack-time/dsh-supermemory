@@ -29,6 +29,9 @@ export interface SupermemoryConfig {
     recallEnabled: boolean;
     recallTopK: number;
     recallMaxChars: number;
+    /** Relevance floor for injected memories: hits below this similarity are
+     *  dropped (filtered client-side; the server still receives the request). */
+    recallThreshold: number;
 }
 /** Settings namespace schema: where to reach the local Supermemory server. */
 export declare const SUPERMEMORY_SCHEMA: z<Schemastery.ObjectS<{
@@ -42,6 +45,7 @@ export declare const SUPERMEMORY_SCHEMA: z<Schemastery.ObjectS<{
     recallEnabled: z<boolean, boolean>;
     recallTopK: z<number, number>;
     recallMaxChars: z<number, number>;
+    recallThreshold: z<number, number>;
 }>, Schemastery.ObjectT<{
     baseUrl: z<string, string>;
     apiKey: z<string, string>;
@@ -53,6 +57,7 @@ export declare const SUPERMEMORY_SCHEMA: z<Schemastery.ObjectS<{
     recallEnabled: z<boolean, boolean>;
     recallTopK: z<number, number>;
     recallMaxChars: z<number, number>;
+    recallThreshold: z<number, number>;
 }>>;
 /** Resolve the effective configuration from a settings scope. */
 export declare function resolveConfig(scope: SettingsScope<any>): SupermemoryConfig;

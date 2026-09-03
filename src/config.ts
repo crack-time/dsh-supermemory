@@ -35,6 +35,9 @@ export interface SupermemoryConfig {
     recallEnabled: boolean;
     recallTopK: number;
     recallMaxChars: number;
+    /** Relevance floor for injected memories: hits below this similarity are
+     *  dropped (filtered client-side; the server still receives the request). */
+    recallThreshold: number;
 }
 
 /** Settings namespace schema: where to reach the local Supermemory server. */
@@ -51,6 +54,7 @@ export const SUPERMEMORY_SCHEMA = z.object({
     recallEnabled: z.boolean().default(true),
     recallTopK: z.number().default(4),
     recallMaxChars: z.number().default(1600),
+    recallThreshold: z.number().default(0.55),
 });
 
 function mergeConfig(value: unknown): SupermemoryConfig {
@@ -66,6 +70,7 @@ function mergeConfig(value: unknown): SupermemoryConfig {
         recallEnabled: v.recallEnabled === undefined ? true : v.recallEnabled === true,
         recallTopK: typeof v.recallTopK === 'number' && Number.isFinite(v.recallTopK) ? Math.max(1, Math.min(10, Math.floor(v.recallTopK))) : 4,
         recallMaxChars: typeof v.recallMaxChars === 'number' && Number.isFinite(v.recallMaxChars) ? Math.max(200, Math.floor(v.recallMaxChars)) : 1600,
+        recallThreshold: typeof v.recallThreshold === 'number' && Number.isFinite(v.recallThreshold) ? Math.max(0, Math.min(1, v.recallThreshold)) : 0.55,
     };
 }
 

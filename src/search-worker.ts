@@ -10,6 +10,7 @@
  * the synchronous `user/message` event handler.
  */
 import { Worker } from 'node:worker_threads';
+import { filterSearchHits } from './recall.ts';
 
 const DATA_OFFSET = 8;
 const RESULT_BYTES = 256 * 1024;
@@ -43,13 +44,14 @@ export class SearchWorker {
         query: string,
         container: string,
         limit: number,
+        threshold = 0.5,
         timeoutMs = 8000,
     ): SearchHit[] {
         const worker = this.ensure();
         const i32 = new Int32Array(this.sab);
         Atomics.store(i32, 0, 0); // idle
         Atomics.store(i32, 1, 0); // clear length
-        worker.postMessage({ sab: this.sab, base, apiKey, query, container, limit });
+        worker.postMessage({ sab: this.sab, base, apiKey, query, container, limit, threshold });
         Atomics.wait(i32, 0, 0, timeoutMs);
         const state = Atomics.load(i32, 0);
         if (state === 3) throw new Error('search worker reported an error');
@@ -57,12 +59,10 @@ export class SearchWorker {
         const n = Atomics.load(i32, 1);
         const bytes = new Uint8Array(this.sab).subarray(DATA_OFFSET, DATA_OFFSET + n);
         const data = JSON.parse(Buffer.from(bytes).toString('utf8')) as {
-            memories?: Array<{ memory?: string }>;
-            results?: Array<{ memory?: string }>;
+            memories?: Array<unknown>;
+            results?: Array<unknown>;
         };
-        return (data.results ?? data.memories ?? [])
-            .map((m) => ({ memory: m.memory ?? '' }))
-            .filter((m) => m.memory.length > 0);
+        return filterSearchHits(data.results ?? data.memories ?? [], threshold);
     }
 
     dispose(): void {

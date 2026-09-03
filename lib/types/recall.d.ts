@@ -10,6 +10,18 @@
 export declare function recallSignature(text: string): string;
 /** Bounded top-k limit shared by the search call and the renderer. */
 export declare function clampTopK(value: number): number;
+/** Relevance-floor helper: clamp into [0, 1]. */
+export declare function clampThreshold(value: number): number;
+/**
+ * Post-process raw /v4/search hits for injection: drop hits below the
+ * relevance floor and de-duplicate by `rootMemoryId` (the server may return
+ * several versions of the same underlying memory). Hits without a `similarity`
+ * are kept (treated as passing the floor); hits without a `rootMemoryId`
+ * de-duplicate by their text. Returns [{ memory }].
+ */
+export declare function filterSearchHits(raw: ReadonlyArray<unknown>, threshold: number): Array<{
+    memory: string;
+}>;
 /**
  * Render cached hits as an untrusted memory block, or an empty string when
  * there are no hits. `topK` caps the number of memories, `maxChars` the total.

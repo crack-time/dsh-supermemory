@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { recallSignature, clampTopK, renderRecall } from '../lib/recall.js';
+import { recallSignature, clampTopK, renderRecall, filterSearchHits } from '../lib/recall.js';
 
 test('recallSignature: trims and collapses whitespace across runs', () => {
     assert.equal(recallSignature('  hello    world '), 'hello world');
@@ -35,4 +35,39 @@ test('renderRecall: respects maxChars and truncates the body (header excluded)',
     const body = out.slice(out.indexOf('\n') + 1); // drop the untrusted-marking header line
     assert.ok(body.length <= 200 + 2, 'body must be capped at maxChars (+ newline + ellipsis)');
     assert.ok(out.endsWith('…'));
+});
+
+test('filterSearchHits: drops hits below the threshold', () => {
+    const raw = [
+        { memory: 'high', similarity: 0.9, rootMemoryId: 'h1' },
+        { memory: 'low', similarity: 0.3, rootMemoryId: 'l1' },
+    ];
+    const out = filterSearchHits(raw, 0.55);
+    assert.deepEqual(out.map((m) => m.memory), ['high']);
+});
+
+test('filterSearchHits: de-duplicates by rootMemoryId keeping the best similarity', () => {
+    const raw = [
+        { memory: 'same (weak)', similarity: 0.6, rootMemoryId: 'r1' },
+        { memory: 'same (strong)', similarity: 0.9, rootMemoryId: 'r1' },
+        { memory: 'other', similarity: 0.8, rootMemoryId: 'r2' },
+    ];
+    const out = filterSearchHits(raw, 0.5);
+    assert.deepEqual(out.map((m) => m.memory), ['same (strong)', 'other']);
+});
+
+test('filterSearchHits: keeps hits without similarity, dedups by text when no rootMemoryId', () => {
+    const raw = [
+        { memory: 'no-score A' },
+        { memory: 'no-score B' },
+        { memory: 'no-score A' },
+    ];
+    const out = filterSearchHits(raw, 0.55);
+    assert.deepEqual(out.map((m) => m.memory), ['no-score A', 'no-score B']);
+});
+
+test('filterSearchHits: tolerates non-array / empty input', () => {
+    assert.deepEqual(filterSearchHits(undefined, 0.5), []);
+    assert.deepEqual(filterSearchHits([], 0.5), []);
+    assert.deepEqual(filterSearchHits([null, {}, { memory: '' }], 0.5), []);
 });
