@@ -3,9 +3,10 @@
  *  - session/created -> snapshot the container + fetch profile into cache;
  *    the systemPrompt.context() registration reads the cache synchronously
  *    on every model step, so no agent.inject() is needed.
- *  - user/message -> per-message dynamic recall: dedupe + async-search the
- *    message and cache hits; the `supermemory:recall-dynamic` section injects
- *    them (bounded, marked untrusted) right after the static profile.
+ *  - user/message -> per-message dynamic recall: dedupe + synchronously search
+ *    the message (so the cache is guaranteed populated before prompt assembly)
+ *    and cache hits; the `supermemory:recall-dynamic` section injects them
+ *    (bounded, marked untrusted) right after the static profile.
  *  - turn/end -> accumulate the turn transcript and PATCH it into the
  *    session's single supermemory document (each session owns one doc).
  *    Subagent sessions are skipped for all of the above.
@@ -13,6 +14,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { Session } from '@deepseek-ai/dsh-session';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
+import { execFileSync } from 'node:child_process';
 import { activeContainer, requireUpstream, resolveConfig } from './config.ts';
 import { fetchProfile } from './containers.ts';
 import { messageText, turnTranscript } from './transcript.ts';
@@ -296,31 +298,64 @@ function recallState(sessionId: string): RecallState {
     return state;
 }
 
-/** Semantic search over the active container; never throws. */
-async function recallSearch(
+/**
+ * Deterministic sync search over the active container.
+ *
+ * cordis `ctx.emit()` dispatches handlers synchronously and does NOT await
+ * their returned promises, so an async search in a `user/message` handler can't
+ * be guaranteed to have landed before the system prompt is assembled. To make
+ * the injected recall deterministic we run the search SYNCHRONOUSLY here (via a
+ * tiny inline `node -e` subprocess that performs the local HTTP call), so the
+ * cache is populated before `emit` returns — and before assembly reads it.
+ * Bounded by a hard timeout; never throws.
+ */
+function recallSearchSync(
     scope: SettingsScope<any>,
     container: string,
     query: string,
     limit: number,
-): Promise<Array<{ memory: string }>> {
+): Array<{ memory: string }> {
     try {
         const { base, apiKey } = requireUpstream(scope);
-        const data = await apiFetch<{
+        const script =
+            '(async () => {\n' +
+            '  const base = process.env.SM_BASE;\n' +
+            '  const key = process.env.SM_KEY;\n' +
+            '  try {\n' +
+            '    const r = await fetch(base + "/v4/search", {\n' +
+            '      method: "POST",\n' +
+            '      headers: { authorization: "Bearer " + key, "content-type": "application/json" },\n' +
+            '      body: JSON.stringify({ q: process.env.SM_Q, containerTag: process.env.SM_CONTAINER, threshold: 0.5, limit: +process.env.SM_LIMIT })\n' +
+            '    });\n' +
+            '    process.stdout.write(await r.text());\n' +
+            '  } catch (e) { process.exitCode = 1; }\n' +
+            '})();';
+        const out = execFileSync(process.execPath, ['-e', script], {
+            env: {
+                ...process.env,
+                SM_BASE: base,
+                SM_KEY: apiKey,
+                SM_Q: query,
+                SM_CONTAINER: container,
+                SM_LIMIT: String(limit),
+            },
+            encoding: 'utf8',
+            timeout: 8000,
+            windowsHide: true,
+            maxBuffer: 4 * 1024 * 1024,
+        });
+        const data = JSON.parse(out) as {
             memories?: Array<{ memory?: string }>;
             results?: Array<{ memory?: string }>;
-        }>(base, apiKey, '/v4/search', {
-            method: 'POST',
-            body: { q: query, containerTag: container, threshold: 0.5, limit },
-            timeoutMs: 8000,
-        });
+        };
         return (data.memories ?? data.results ?? [])
             .map((m) => ({ memory: m.memory ?? '' }))
             .filter((m) => m.memory.length > 0);
-    } catch { /* upstream down — silently skip recall for this message */ }
+    } catch { /* upstream down / no key / timeout — silently skip recall for this message */ }
     return [];
 }
 
-/** Hook a real user message: normalize, dedup, then async-search into cache. */
+/** Hook a real user message: normalize, dedup, then SYNCHRONOUSLY search into cache. */
 function kickRecallSearch(scope: SettingsScope<any>, session: Session, event: unknown): void {
     const e = event as { type?: string; data?: { source?: { kind?: string }; content?: readonly unknown[] } };
     if (e.data?.source?.kind !== 'user') return;
@@ -333,10 +368,8 @@ function kickRecallSearch(scope: SettingsScope<any>, session: Session, event: un
     if (state.searched.has(norm)) return; // dedup this message this session
     state.searched.add(norm);
     const container = sessionContainerRef.get(session.id) ?? activeContainer(scope);
-    const topK = cfg.recallTopK;
-    void recallSearch(scope, container, norm, topK).then((hits) => {
-        if (hits.length > 0) state.bySignature.set(norm, hits);
-    });
+    const hits = recallSearchSync(scope, container, norm, cfg.recallTopK);
+    if (hits.length > 0) state.bySignature.set(norm, hits);
 }
 
 /** Find the current user message's normalized text from the event log. */
