@@ -289,6 +289,10 @@ interface RecallState {
     searched: Set<string>;
     /** Search hits keyed by the normalized message text. */
     bySignature: Map<string, Array<{ memory: string }>>;
+    /** The CURRENT user message + its hits, set in the user/message handler.
+     *  The render path reads this directly instead of scanning the event log,
+     *  so it works even if the message isn't committed to events yet. */
+    current?: { signature: string; hits: Array<{ memory: string }> };
 }
 
 const recallCache = new Map<string, RecallState>();
@@ -379,47 +383,36 @@ function recallSearchExec(
 }
 
 /** Hook a real user message: normalize, dedup, then SYNCHRONOUSLY search into cache. */
-function kickRecallSearch(scope: SettingsScope<any>, session: Session, event: unknown): void {
+/** Hook a real user message: normalize, dedup, then SYNCHRONOUSLY search into cache.
+ *  Returns the hits (so the caller can log them). */
+function kickRecallSearch(scope: SettingsScope<any>, session: Session, event: unknown): Array<{ memory: string }> {
+    const hits: Array<{ memory: string }> = [];
     const e = event as { type?: string; data?: { source?: { kind?: string }; content?: readonly unknown[] } };
-    if (e.data?.source?.kind !== 'user') return;
+    if (e.data?.source?.kind !== 'user') return hits;
     const text = messageText(e.data.content ?? []);
     const norm = recallSignature(text);
-    if (!norm) return;
+    if (!norm) return hits;
     const cfg = resolveConfig(scope);
-    if (!cfg.recallEnabled) return;
+    if (!cfg.recallEnabled) return hits;
     const state = recallState(session.id);
-    if (state.searched.has(norm)) return; // dedup this message this session
+    if (state.searched.has(norm)) {
+        state.current = { signature: norm, hits: state.bySignature.get(norm) ?? [] };
+        return state.current.hits;
+    }
     state.searched.add(norm);
     const container = sessionContainerRef.get(session.id) ?? activeContainer(scope);
-    const hits = recallSearchSync(scope, container, norm, cfg.recallTopK);
-    if (hits.length > 0) state.bySignature.set(norm, hits);
-}
-
-/** Find the current user message's normalized text from the event log. */
-function currentRecallSignature(session: Session): string | undefined {
-    const events = session.snapshotEvents();
-    for (let i = events.length - 1; i >= 0; i -= 1) {
-        const e = events[i];
-        if (!e || e.type !== 'user/message') continue;
-        const src = (e.data as { source?: { kind?: string } }).source;
-        if (src?.kind !== 'user') continue;
-        const text = messageText((e.data as { content: readonly unknown[] }).content);
-        const norm = recallSignature(text);
-        if (norm) return norm;
-    }
-    return undefined;
+    const found = recallSearchSync(scope, container, norm, cfg.recallTopK);
+    state.current = { signature: norm, hits: found };
+    if (found.length > 0) state.bySignature.set(norm, found);
+    return found;
 }
 
 /** Render the cached hits for the current message — pure read, bounded, marked untrusted. */
 function recallDynamicText(scope: SettingsScope<any>, session: Session): string {
     const state = recallCache.get(session.id);
-    if (!state) return '';
-    const sig = currentRecallSignature(session);
-    if (!sig) return '';
-    const hits = state.bySignature.get(sig);
-    if (!hits || hits.length === 0) return '';
+    if (!state?.current || state.current.hits.length === 0) return '';
     const cfg = resolveConfig(scope);
-    return renderRecall(hits, cfg.recallTopK, cfg.recallMaxChars);
+    return renderRecall(state.current.hits, cfg.recallTopK, cfg.recallMaxChars);
 }
 
 /** Register the systemPrompt.context() + session hooks. */
@@ -517,7 +510,8 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
     disposers.push(ctx.on('session/event', (session, event) => {
         if (isSubagent(session)) return;
         if (event.type === 'user/message') {
-            kickRecallSearch(scope, session, event);
+            const hits = kickRecallSearch(scope, session, event);
+            ctx.logger.debug(`[supermemory:recall] session=${session.id} hits=${hits.length}`);
             return;
         }
         if (event.type !== 'turn/end') return;
