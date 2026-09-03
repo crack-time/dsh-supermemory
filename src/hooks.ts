@@ -1,7 +1,7 @@
 /**
  * Deterministic session hooks:
  *  - session/created -> snapshot the container + fetch profile into cache;
- *    the systemPrompt.context() registration reads the cache synchronously
+ *    the systemPrompt.section() registrations read the cache synchronously
  *    on every model step, so no agent.inject() is needed.
  *  - user/message -> per-message dynamic recall: dedupe + synchronously search
  *    the message (so the cache is guaranteed populated before prompt assembly)
@@ -27,7 +27,7 @@ import { recallSignature, renderRecall, filterSearchHits } from './recall.ts';
 const searchWorker = new SearchWorker();
 
 // ---------------------------------------------------------------------------
-// Context injection via systemPrompt.context()
+// Context injection via systemPrompt.section()
 // ---------------------------------------------------------------------------
 
 /**
@@ -106,7 +106,7 @@ async function waitDocumentDone(
 
 /**
  * Cached profile text per session, populated asynchronously in session/created
- * and read synchronously by the systemPrompt.context() text function.
+ * and read synchronously by the systemPrompt.section() text functions.
  */
 const sessionProfileCache = new Map<string, string>();
 
@@ -419,10 +419,18 @@ function recallDynamicText(scope: SettingsScope<any>, session: Session): string 
 export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): Array<() => void> {
     const disposers: Array<() => void> = [];
 
-    // ── Dynamic context via systemPrompt ────────────────────────────────
+    // ── Dynamic sections via systemPrompt ───────────────────────────────
+    //
+    // These are `section()` (rendered into the system role on every model step)
+    // rather than `context()` (a runtime-context snapshot appended as a USER
+    // message). Sections are re-rendered each step with no cross-step
+    // de-duplication, so a per-message section can never be swallowed by the
+    // snapshot `project()` equality check — which is exactly what happened with
+    // `context()` (turns where the assembled snapshot happened to equal the
+    // retained one appended nothing, so the model saw no recall at all).
     ctx.inject(['systemPrompt'], (scopedCtx) => {
-        // Dynamic environment block — first context the model reads (order 5).
-        disposers.push(scopedCtx.systemPrompt.context({
+        // Dynamic environment block — early in the system prompt.
+        disposers.push(scopedCtx.systemPrompt.section({
             name: 'supermemory:environment',
             order: 5,
             text: (context: { agent?: { session?: Session } }) => {
@@ -431,7 +439,7 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
                 return environmentBlock(ctx, session);
             },
         }));
-        disposers.push(scopedCtx.systemPrompt.context({
+        disposers.push(scopedCtx.systemPrompt.section({
             name: 'supermemory:recall',
             order: 200,
             text: (context: { agent?: { session?: Session } }) => {
@@ -446,7 +454,7 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
                     '\n\n[SYSTEM INSTRUCTION] Memory queries default to the active memory space above.';
             },
         }));
-        disposers.push(scopedCtx.systemPrompt.context({
+        disposers.push(scopedCtx.systemPrompt.section({
             name: 'supermemory:recall-dynamic',
             order: 210,
             text: (context: { agent?: { session?: Session } }) => {

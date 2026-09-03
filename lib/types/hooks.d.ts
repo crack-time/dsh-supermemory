@@ -1,7 +1,7 @@
 /**
  * Deterministic session hooks:
  *  - session/created -> snapshot the container + fetch profile into cache;
- *    the systemPrompt.context() registration reads the cache synchronously
+ *    the systemPrompt.section() registrations read the cache synchronously
  *    on every model step, so no agent.inject() is needed.
  *  - user/message -> per-message dynamic recall: dedupe + synchronously search
  *    the message (so the cache is guaranteed populated before prompt assembly)
