@@ -98,31 +98,6 @@ async function waitDocumentDone(
     }
 }
 
-/**
- * Scan the session for an existing static-context injection (survives host
- * restart / compaction). Returns the container tag embedded in the injected
- * user/message text, or undefined if no prior injection exists. Forward scan
- * is correct here: the static block is injected at session creation.
- */
-function recoverInjectedContainer(session: Session): string | undefined {
-    const events = session.snapshotEvents();
-    for (const e of events) {
-        if (!e) continue;
-        if ((e.type as string) !== 'user/message') continue;
-        const data = (e.data as { source?: { plugin?: string }; content?: readonly unknown[] });
-        if (data.source?.plugin !== '@crack/dsh-supermemory') continue;
-        for (const block of data.content ?? []) {
-            const b = block as { type?: string; text?: string };
-            if (typeof b.text === 'string') {
-                const match = b.text.match(/Active memory space: (\S+)/);
-                if (match) return match[1];
-            }
-        }
-        return undefined;
-    }
-    return undefined;
-}
-
 // ---------------------------------------------------------------------------
 // Turn persistence — one document per finished turn.
 // ---------------------------------------------------------------------------
@@ -280,15 +255,10 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
     // `resolve` reads the per-session caches the session/created hook fills.
     ctx.inject(['systemPrompt'], (scopedCtx) => {
         disposers.push(...registerMemoryContexts(scopedCtx, ctx, scope, (session) => {
-            const sid = session?.id ?? '';
             return {
                 container: sessionContainerFor(session!, scope),
                 profile: session ? (sessionProfileCache.get(session.id) ?? '') : '',
             };
-        }));
-        // Re-evaluate config snapshots when settings change (recall tuning).
-        disposers.push(ctx.on('settings/document-updated', () => {
-            /* config is read per-assembly via resolveConfig; nothing to cache here */
         }));
     });
 
@@ -312,11 +282,7 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
         ensureWslProbe(session);
         void (async () => {
             try {
-                const recovered = recoverInjectedContainer(session);
-                const active = recovered ?? activeContainer(scope);
-                if (recovered) {
-                    ctx.logger.debug('supermemory: recovered container "' + recovered + '" for session ' + session.id);
-                }
+                const active = activeContainer(scope);
                 if (!sessionContainerRef.has(session.id)) {
                     sessionContainerRef.set(session.id, active);
                 }
