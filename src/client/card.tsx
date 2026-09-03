@@ -51,11 +51,11 @@ export function SupermemorySettingsCard(props: CardProps) {
 
     const {
         open, baseUrl, apiKey, serverPath, openaiApiKey, openaiBaseUrl,
-        openaiModel, managed, server,
+        openaiModel, recallEnabled, recallTopK, managed, server,
         saving, saveFailed, justSaved, testing, status, loadErr,
         dirty, mgtText,
         setOpen, setBaseUrl, setApiKey, setServerPath, setOpenaiApiKey,
-        setOpenaiBaseUrl, setOpenaiModel,
+        setOpenaiBaseUrl, setOpenaiModel, setRecallEnabled, setRecallTopK,
         setSaveFailed, commit, runTest,
     } = useSupermemoryCard({ t: txt, applyPatch });
 
@@ -146,6 +146,28 @@ export function SupermemorySettingsCard(props: CardProps) {
                             spellCheck={false}
                             onChange={(e) => setOpenaiModel(e.target.value)}
                         />
+                    </label>
+
+                    <label className="sm-settings-row sm-settings-check">
+                        <span className="sm-settings-label">{txt('recallEnabled')}</span>
+                        <input
+                            type="checkbox"
+                            checked={recallEnabled}
+                            onChange={(e) => setRecallEnabled(e.target.checked)}
+                        />
+                        <span className="sm-settings-hint">{txt('recallEnabledHint')}</span>
+                    </label>
+                    <label className="sm-settings-row">
+                        <span className="sm-settings-label">{txt('recallTopK')}</span>
+                        <input
+                            type="number"
+                            min={1}
+                            max={10}
+                            step={1}
+                            value={recallTopK}
+                            onChange={(e) => setRecallTopK(Number(e.target.value))}
+                        />
+                        <span className="sm-settings-hint">{txt('recallTopKHint')}</span>
                     </label>
 
                     <div className="sm-settings-serverrow">

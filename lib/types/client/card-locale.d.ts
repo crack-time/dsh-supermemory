@@ -46,6 +46,10 @@ export declare const CARD_LOCALE: {
         mgtError: string;
         activeContainer: string;
         activeContainerHint: string;
+        recallEnabled: string;
+        recallEnabledHint: string;
+        recallTopK: string;
+        recallTopKHint: string;
         loadingContainers: string;
         noContainers: string;
         createNew: string;
@@ -91,6 +95,10 @@ export declare const CARD_LOCALE: {
         mgtError: string;
         activeContainer: string;
         activeContainerHint: string;
+        recallEnabled: string;
+        recallEnabledHint: string;
+        recallTopK: string;
+        recallTopKHint: string;
         loadingContainers: string;
         noContainers: string;
         createNew: string;

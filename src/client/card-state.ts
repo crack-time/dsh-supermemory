@@ -19,6 +19,8 @@ export interface CardState {
     openaiBaseUrl: string;
     openaiModel: string;
     activeContainer: string;
+    recallEnabled: boolean;
+    recallTopK: number;
 }
 
 export interface ManagedStatus {
@@ -52,6 +54,8 @@ const DEFAULT_EMPTY: CardState = {
     openaiBaseUrl: '',
     openaiModel: '',
     activeContainer: '',
+    recallEnabled: true,
+    recallTopK: 4,
 };
 
 /** All state and actions behind the Supermemory settings card. */
@@ -66,6 +70,8 @@ export function useSupermemoryCard(deps: CardHookDeps) {
     const [openaiApiKey, setOpenaiApiKey] = useState('');
     const [openaiBaseUrl, setOpenaiBaseUrl] = useState('');
     const [openaiModel, setOpenaiModel] = useState('');
+    const [recallEnabled, setRecallEnabled] = useState(true);
+    const [recallTopK, setRecallTopK] = useState(4);
     const [managed, setManaged] = useState<ManagedStatus | null>(null);
     const [server, setServer] = useState<CardState | null>(null);
     const [saving, setSaving] = useState(false);
@@ -81,7 +87,9 @@ export function useSupermemoryCard(deps: CardHookDeps) {
             serverPath.trim() !== server.serverPath ||
             openaiApiKey.trim() !== server.openaiApiKey ||
             openaiBaseUrl.trim() !== server.openaiBaseUrl ||
-            openaiModel.trim() !== server.openaiModel);
+            openaiModel.trim() !== server.openaiModel ||
+            recallEnabled !== !!server.recallEnabled ||
+            recallTopK !== (server.recallTopK ?? 4));
 
     async function load() {
         setLoadErr(false);
@@ -96,6 +104,8 @@ export function useSupermemoryCard(deps: CardHookDeps) {
             setOpenaiApiKey(cfg.openaiApiKey ?? '');
             setOpenaiBaseUrl(cfg.openaiBaseUrl ?? '');
             setOpenaiModel(cfg.openaiModel ?? '');
+            setRecallEnabled(cfg.recallEnabled !== false);
+            setRecallTopK(typeof cfg.recallTopK === 'number' ? cfg.recallTopK : 4);
             setServer({
                 baseUrl: cfg.baseUrl ?? '',
                 apiKey: cfg.apiKey ?? '',
@@ -104,6 +114,8 @@ export function useSupermemoryCard(deps: CardHookDeps) {
                 openaiBaseUrl: cfg.openaiBaseUrl ?? '',
                 openaiModel: cfg.openaiModel ?? '',
                 activeContainer: cfg.activeContainer ?? '',
+                recallEnabled: cfg.recallEnabled !== false,
+                recallTopK: typeof cfg.recallTopK === 'number' ? cfg.recallTopK : 4,
             });
             setStatus(null);
             fetch(API_URLS.health, { cache: 'no-store' })
@@ -132,6 +144,8 @@ export function useSupermemoryCard(deps: CardHookDeps) {
         if (openaiApiKey.trim() !== (server?.openaiApiKey ?? '')) patch.openaiApiKey = openaiApiKey.trim();
         if (openaiBaseUrl.trim() !== (server?.openaiBaseUrl ?? '')) patch.openaiBaseUrl = openaiBaseUrl.trim();
         if (openaiModel.trim() !== (server?.openaiModel ?? '')) patch.openaiModel = openaiModel.trim();
+        if (recallEnabled !== !!server?.recallEnabled) patch.recallEnabled = recallEnabled;
+        if (recallTopK !== (server?.recallTopK ?? 4)) patch.recallTopK = recallTopK;
         if (Object.keys(patch).length === 0) return;
         setSaving(true);
         setSaveFailed(false);
@@ -221,12 +235,13 @@ export function useSupermemoryCard(deps: CardHookDeps) {
 
     return {
         open, loading, baseUrl, apiKey, serverPath, openaiApiKey, openaiBaseUrl,
-        openaiModel, managed, server,
+        openaiModel, recallEnabled, recallTopK, managed, server,
         saving, saveFailed, justSaved, testing, status, loadErr,
         dirty, mgtText,
         setOpen, setBaseUrl, setApiKey, setServerPath, setOpenaiApiKey,
-        setOpenaiBaseUrl, setOpenaiModel, setManaged, setSaving, setSaveFailed,
-        setJustSaved, setTesting, setStatus, setLoadErr,
+        setOpenaiBaseUrl, setOpenaiModel, setRecallEnabled, setRecallTopK,
+        setManaged, setSaving, setSaveFailed, setJustSaved, setTesting,
+        setStatus, setLoadErr,
         load, commit, runTest,
     };
 }

@@ -98,7 +98,8 @@ export const CARD_CSS = `
   line-height: 20px;
 }
 [data-supermemory-settings] input[type="text"],
-[data-supermemory-settings] input[type="password"] {
+[data-supermemory-settings] input[type="password"],
+[data-supermemory-settings] input[type="number"] {
   box-sizing: border-box;
   width: 100%;
   height: 34px;
