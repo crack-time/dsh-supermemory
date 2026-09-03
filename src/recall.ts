@@ -64,7 +64,7 @@ export function renderRecall(
     hits: ReadonlyArray<{ memory: string }>,
     topK: number,
     maxChars: number,
-    emptyText = '(目前无相关记忆)',
+    emptyText = '(no relevant memories found for this message)',
 ): string {
     const lines = hits && hits.length > 0
         ? hits.slice(0, clampTopK(topK)).map((h) => '- ' + h.memory)

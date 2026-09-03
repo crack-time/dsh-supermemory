@@ -18,9 +18,9 @@ test('clampTopK: clamps into [1,10]', () => {
 test('renderRecall: empty hits default to a "no memories" placeholder block', () => {
     const out = renderRecall([], 4, 1600);
     assert.ok(out.includes('UNTRUSTED historical data'));
-    assert.ok(out.includes('目前无相关记忆'), 'empty recall must render a placeholder, not silently omit');
+    assert.ok(out.includes('no relevant memories found for this message'), 'empty recall must render an English placeholder, not silently omit');
     const undef = renderRecall(undefined, 4, 1600);
-    assert.ok(undef.includes('目前无相关记忆'));
+    assert.ok(undef.includes('no relevant memories found for this message'));
 });
 
 test('renderRecall: emptyText="" restores the old drop-on-empty behaviour', () => {
