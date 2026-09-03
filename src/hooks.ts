@@ -280,8 +280,10 @@ function isSubagent(session: Session): boolean {
 // at session/created — it answers "who is this user". Dynamic recall is the
 // per-message complement: on every real user message we run a semantic search
 // and cache the hits (deduped + bounded), and the `supermemory:recall-dynamic`
-// section (order 210) injects them right after the profile. The render path is
-// a pure read of the cache — it never blocks on the upstream.
+// section (order 210) injects them right after the profile. The render path
+// ensures the current message is searched (reusing the eager hook's cache or
+// running a synchronous search now) before reading it — so it never renders a
+// stale or empty recall because the hook had not run yet.
 // ---------------------------------------------------------------------------
 
 interface RecallState {
@@ -382,18 +384,19 @@ function recallSearchExec(
     return [];
 }
 
-/** Hook a real user message: normalize, dedup, then SYNCHRONOUSLY search into cache. */
-/** Hook a real user message: normalize, dedup, then SYNCHRONOUSLY search into cache.
- *  Returns the hits (so the caller can log them). */
-function kickRecallSearch(scope: SettingsScope<any>, session: Session, event: unknown): Array<{ memory: string }> {
-    const hits: Array<{ memory: string }> = [];
-    const e = event as { type?: string; data?: { source?: { kind?: string }; content?: readonly unknown[] } };
-    if (e.data?.source?.kind !== 'user') return hits;
-    const text = messageText(e.data.content ?? []);
-    const norm = recallSignature(text);
-    if (!norm) return hits;
-    const cfg = resolveConfig(scope);
-    if (!cfg.recallEnabled) return hits;
+/**
+ * Search one normalized message text, dedup by its signature (any previous
+ * search result for the signature is reused; otherwise a synchronous search
+ * runs now), and set `state.current` to its hits. Shared by the `user/message`
+ * event hook (eager) and the render path (deterministic fallback) so both
+ * always agree on what "current" means. Returns the hits.
+ */
+function searchMessage(
+    scope: SettingsScope<any>,
+    session: Session,
+    norm: string,
+    cfg: ReturnType<typeof resolveConfig>,
+): Array<{ memory: string }> {
     const state = recallState(session.id);
     if (state.searched.has(norm)) {
         state.current = { signature: norm, hits: state.bySignature.get(norm) ?? [] };
@@ -407,11 +410,50 @@ function kickRecallSearch(scope: SettingsScope<any>, session: Session, event: un
     return found;
 }
 
-/** Render the cached hits for the current message — pure read, bounded, marked untrusted. */
+/** Hook a real user message: normalize, dedup, then SYNCHRONOUSLY search into cache.
+ *  Returns the hits (so the caller can log them). */
+function kickRecallSearch(scope: SettingsScope<any>, session: Session, event: unknown): Array<{ memory: string }> {
+    const e = event as { type?: string; data?: { source?: { kind?: string }; content?: readonly unknown[] } };
+    if (e.data?.source?.kind !== 'user') return [];
+    const text = messageText(e.data.content ?? []);
+    const norm = recallSignature(text);
+    if (!norm) return [];
+    const cfg = resolveConfig(scope);
+    if (!cfg.recallEnabled) return [];
+    return searchMessage(scope, session, norm, cfg);
+}
+
+/** The last genuine human user-message text in the session (tail-forward scan). */
+function latestUserText(session: Session): string {
+    const events = session.snapshotEvents();
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+        const e = events[i];
+        if (!e || e.type !== 'user/message') continue;
+        const source = (e.data as { source?: { kind?: string } }).source;
+        if (source?.kind !== 'user') continue;
+        const text = messageText((e.data as { content: readonly unknown[] }).content);
+        if (text.length > 0) return text;
+    }
+    return '';
+}
+
+/**
+ * Deterministic render for the current message. Unlike the old pure-read
+ * version, this makes sure the current message's search is in the cache
+ * BEFORE reading it: if the eager `user/message` hook already populated it the
+ * search is reused, otherwise a synchronous search runs right here. This kills
+ * the race where assembly ran before the hook had written `state.current`, so
+ * a turn could render an empty (or stale) recall even though the recall content
+ * for that message differed from the previous turn.
+ */
 function recallDynamicText(scope: SettingsScope<any>, session: Session): string {
+    const cfg = resolveConfig(scope);
+    if (!cfg.recallEnabled) return '';
+    const norm = recallSignature(latestUserText(session));
+    if (!norm) return '';
+    searchMessage(scope, session, norm, cfg);
     const state = recallCache.get(session.id);
     if (!state?.current || state.current.hits.length === 0) return '';
-    const cfg = resolveConfig(scope);
     return renderRecall(state.current.hits, cfg.recallTopK, cfg.recallMaxChars);
 }
 
