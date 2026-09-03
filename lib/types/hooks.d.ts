@@ -4,9 +4,10 @@
  *    the systemPrompt.section() registrations read the cache synchronously
  *    on every model step, so no agent.inject() is needed.
  *  - user/message -> per-message dynamic recall: dedupe + synchronously search
- *    the message (so the cache is guaranteed populated before prompt assembly)
- *    and cache hits; the `supermemory:recall-dynamic` section injects them
- *    (bounded, marked untrusted) right after the static profile.
+ *    the message, then append it as a dedicated `user/message` (source.kind =
+ *    "plugin", source.plugin = "@crack/dsh-supermemory") so the chat renders a
+ *    "Context injection @crack/dsh-supermemory" row; the injected message's own
+ *    event is skipped (source is not "user"), so it cannot recurse.
  *  - turn/end -> accumulate the turn transcript and PATCH it into the
  *    session's single supermemory document (each session owns one doc).
  *    Subagent sessions are skipped for all of the above.
@@ -25,5 +26,5 @@ export interface SessionDocState {
     /** True while a PATCH is in flight — skip new turns until it settles. */
     patching: boolean;
 }
-/** Register the systemPrompt.context() + session hooks. */
+/** Register the systemPrompt.section() + session hooks. */
 export declare function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): Array<() => void>;

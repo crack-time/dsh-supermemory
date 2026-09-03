@@ -4,9 +4,10 @@
  *    the systemPrompt.section() registrations read the cache synchronously
  *    on every model step, so no agent.inject() is needed.
  *  - user/message -> per-message dynamic recall: dedupe + synchronously search
- *    the message (so the cache is guaranteed populated before prompt assembly)
- *    and cache hits; the `supermemory:recall-dynamic` section injects them
- *    (bounded, marked untrusted) right after the static profile.
+ *    the message, then append it as a dedicated `user/message` (source.kind =
+ *    "plugin", source.plugin = "@crack/dsh-supermemory") so the chat renders a
+ *    "Context injection @crack/dsh-supermemory" row; the injected message's own
+ *    event is skipped (source is not "user"), so it cannot recurse.
  *  - turn/end -> accumulate the turn transcript and PATCH it into the
  *    session's single supermemory document (each session owns one doc).
  *    Subagent sessions are skipped for all of the above.
@@ -21,6 +22,7 @@ import { messageText, turnTranscript } from './transcript.ts';
 import { environmentBlock, ensureWslProbe } from './environment.ts';
 import { SearchWorker } from './search-worker.ts';
 import { apiFetch } from './upstream.ts';
+import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { recallSignature, renderRecall, filterSearchHits } from './recall.ts';
 
 /** One persistent search worker shared by every session (spawned on first use). */
@@ -291,10 +293,6 @@ interface RecallState {
     searched: Set<string>;
     /** Search hits keyed by the normalized message text. */
     bySignature: Map<string, Array<{ memory: string }>>;
-    /** The CURRENT user message + its hits, set in the user/message handler.
-     *  The render path reads this directly instead of scanning the event log,
-     *  so it works even if the message isn't committed to events yet. */
-    current?: { signature: string; hits: Array<{ memory: string }> };
 }
 
 const recallCache = new Map<string, RecallState>();
@@ -387,9 +385,7 @@ function recallSearchExec(
 /**
  * Search one normalized message text, dedup by its signature (any previous
  * search result for the signature is reused; otherwise a synchronous search
- * runs now), and set `state.current` to its hits. Shared by the `user/message`
- * event hook (eager) and the render path (deterministic fallback) so both
- * always agree on what "current" means. Returns the hits.
+ * runs now), and cache the hits by signature. Returns the hits.
  */
 function searchMessage(
     scope: SettingsScope<any>,
@@ -398,14 +394,10 @@ function searchMessage(
     cfg: ReturnType<typeof resolveConfig>,
 ): Array<{ memory: string }> {
     const state = recallState(session.id);
-    if (state.searched.has(norm)) {
-        state.current = { signature: norm, hits: state.bySignature.get(norm) ?? [] };
-        return state.current.hits;
-    }
+    if (state.searched.has(norm)) return state.bySignature.get(norm) ?? [];
     state.searched.add(norm);
     const container = sessionContainerRef.get(session.id) ?? activeContainer(scope);
     const found = recallSearchSync(scope, container, norm, cfg.recallTopK);
-    state.current = { signature: norm, hits: found };
     if (found.length > 0) state.bySignature.set(norm, found);
     return found;
 }
@@ -423,53 +415,37 @@ function kickRecallSearch(scope: SettingsScope<any>, session: Session, event: un
     return searchMessage(scope, session, norm, cfg);
 }
 
-/** The last genuine human user-message text in the session (tail-forward scan). */
-function latestUserText(session: Session): string {
-    const events = session.snapshotEvents();
-    for (let i = events.length - 1; i >= 0; i -= 1) {
-        const e = events[i];
-        if (!e || e.type !== 'user/message') continue;
-        const source = (e.data as { source?: { kind?: string } }).source;
-        if (source?.kind !== 'user') continue;
-        const text = messageText((e.data as { content: readonly unknown[] }).content);
-        if (text.length > 0) return text;
-    }
-    return '';
-}
-
 /**
- * Deterministic render for the current message. Unlike the old pure-read
- * version, this makes sure the current message's search is in the cache
- * BEFORE reading it: if the eager `user/message` hook already populated it the
- * search is reused, otherwise a synchronous search runs right here. This kills
- * the race where assembly ran before the hook had written `state.current`, so
- * a turn could render an empty (or stale) recall even though the recall content
- * for that message differed from the previous turn.
+ * Append the rendered recall as a dedicated `user/message` so it shows up in the
+ * chat as a "Context injection @crack/dsh-supermemory" row (the chat renderer
+ * classifies any user/message whose `source.kind !== "user"` as a context row
+ * and labels it from `source.plugin`). The injected message's own
+ * `user/message` event is ignored by `kickRecallSearch` (its source is not
+ * `user`), so this cannot recurse.
  */
-function recallDynamicText(scope: SettingsScope<any>, session: Session): string {
+function appendRecallMessage(scope: SettingsScope<any>, session: Session, hits: Array<{ memory: string }>): void {
     const cfg = resolveConfig(scope);
-    if (!cfg.recallEnabled) return '';
-    const norm = recallSignature(latestUserText(session));
-    if (!norm) return '';
-    searchMessage(scope, session, norm, cfg);
-    const state = recallCache.get(session.id);
-    if (!state?.current || state.current.hits.length === 0) return '';
-    return renderRecall(state.current.hits, cfg.recallTopK, cfg.recallMaxChars);
+    const text = renderRecall(hits, cfg.recallTopK, cfg.recallMaxChars);
+    if (!text) return;
+    session.append('user/message', createUserMessage({
+        content: [{ type: 'text', text }],
+        source: { kind: 'plugin', plugin: '@crack/dsh-supermemory' },
+    }), { surfaceOp: 'append' });
 }
 
-/** Register the systemPrompt.context() + session hooks. */
+/** Register the systemPrompt.section() + session hooks. */
 export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): Array<() => void> {
     const disposers: Array<() => void> = [];
 
-    // ── Dynamic sections via systemPrompt ───────────────────────────────
+    // ── Static sections via systemPrompt ────────────────────────────────
     //
-    // These are `section()` (rendered into the system role on every model step)
-    // rather than `context()` (a runtime-context snapshot appended as a USER
-    // message). Sections are re-rendered each step with no cross-step
-    // de-duplication, so a per-message section can never be swallowed by the
-    // snapshot `project()` equality check — which is exactly what happened with
-    // `context()` (turns where the assembled snapshot happened to equal the
-    // retained one appended nothing, so the model saw no recall at all).
+    // Environment and the static profile are `section()` (rendered into the
+    // system role on every model step). They are set-once per session so they
+    // carry no per-message de-duplication concern. The dynamic recall is NOT a
+    // section here — it is appended as its own `user/message` in the
+    // `user/message` hook so the chat shows a "Context injection" row labelled
+    // with our plugin id (see `appendRecallMessage`), which also sidesteps the
+    // snapshot `project()` equality check that swallowed per-message recall.
     ctx.inject(['systemPrompt'], (scopedCtx) => {
         // Dynamic environment block — early in the system prompt.
         disposers.push(scopedCtx.systemPrompt.section({
@@ -494,15 +470,6 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
                     'Active memory space: ' + container + '\n\n' +
                     profile +
                     '\n\n[SYSTEM INSTRUCTION] Memory queries default to the active memory space above.';
-            },
-        }));
-        disposers.push(scopedCtx.systemPrompt.section({
-            name: 'supermemory:recall-dynamic',
-            order: 210,
-            text: (context: { agent?: { session?: Session } }) => {
-                const session = context.agent?.session;
-                if (!session || isSubagent(session)) return '';
-                return recallDynamicText(scope, session);
             },
         }));
     });
@@ -562,6 +529,7 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
         if (event.type === 'user/message') {
             const hits = kickRecallSearch(scope, session, event);
             ctx.logger.debug(`[supermemory:recall] session=${session.id} hits=${hits.length}`);
+            if (hits.length > 0) appendRecallMessage(scope, session, hits);
             return;
         }
         if (event.type !== 'turn/end') return;
