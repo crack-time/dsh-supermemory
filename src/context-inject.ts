@@ -1,28 +1,24 @@
 /**
- * Deterministic memory-context injection for the model stream.
+ * Memory-context contributions registered through the native prompt channel.
  *
- * This is the plugin's own "context" channel: everything injected here is
- * appended as a dedicated `user/message` (source.kind = "plugin",
- * source.plugin = "@crack/dsh-supermemory") so the chat renders a
- * "Context injection @crack/dsh-supermemory" row and the message is present in
- * the model-visible surface on the very next `deriveMessages()` snapshot.
+ * This module provides the two `systemPrompt.context()` registrations the
+ * plugin contributes:
+ *   - STATIC context (environment block + static profile): set-once, sits at
+ *     the head of the conversation.
+ *   - DYNAMIC recall: on every assembly the current user message is searched
+ *     synchronously and the top hits are rendered.
  *
- * Two kinds of content:
- *   - STATIC context (environment block + static profile): assembled once per
- *     session (set-once), injected at session creation so it sits at the head
- *     of the conversation and is always in the surface. This replaces the old
- *     `systemPrompt.section()` registrations, which were rendered into the
- *     system role and therefore never showed up as a context row.
- *   - DYNAMIC recall: on every real user message a semantic search runs
- *     synchronously into a cache and the top hits are appended. Because the
- *     append is synchronous (see Session.append), the recall lands before the
- *     first `deriveMessages()` snapshot of that turn — so a single-step turn
- *     (no tool call) no longer drops it.
+ * Both flow through the agent-loop's normal assemble → project() path, so the
+ * timing is exactly the native step-level one: the agent-loop evaluates
+ * context on every step, and only appends a snapshot user/message when the
+ * rendered text changed (RuntimeContextProjection.project()). This is what
+ * makes the injection land before the first `deriveMessages()` of a turn and
+ * stay native-consistent across tool-call steps.
  *
- * Why not `systemPrompt.context()`: the agent-loop's RuntimeContextProjection
- * hardcodes the source plugin to @deepseek-ai/dsh-system-prompt, so anything
- * registered there cannot be labelled with our own plugin id. Appending our
- * own `user/message` is the only way to keep the @crack/dsh-supermemory label.
+ * Attribution: these join the native runtime-context snapshot, so their
+ * rendered row carries the native @deepseek-ai/dsh-system-prompt label (the
+ * agent-loop hardcodes the snapshot source). Names still use the "supermemory:"
+ * prefix so the sections are self-describing inside the snapshot.
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { Session } from '@deepseek-ai/dsh-session';
@@ -32,22 +28,21 @@ import { requireUpstream, resolveConfig } from './config.ts';
 import { messageText } from './transcript.ts';
 import { environmentBlock } from './environment.ts';
 import { SearchWorker } from './search-worker.ts';
-import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { recallSignature, renderRecall, filterSearchHits } from './recall.ts';
 
 /** One persistent search worker shared by every session (spawned on first use). */
 const searchWorker = new SearchWorker();
 
 // ---------------------------------------------------------------------------
-// Static context block (environment + static profile), set-once per session
+// Static context text (environment block + static profile)
 // ---------------------------------------------------------------------------
 
 /**
  * Assemble the static context text: the dynamic environment block (cwd, git,
- * platform, shell, OS, uv) followed by the memory profile banner. Returns ''
- * when nothing is available to inject.
+ * platform, shell, OS, uv) followed by the memory profile banner. Called as
+ * the `text` provider for the static context registration.
  */
-export function contextMessageText(
+export function staticContextText(
     ctx: Context,
     session: Session,
     container: string,
@@ -63,37 +58,15 @@ export function contextMessageText(
     return [env, banner].filter((s) => s.length > 0).join('\n\n');
 }
 
-/** Append one labelled context message. No-op on empty text. */
-function appendContextMessage(session: Session, text: string): void {
-    if (!text) return;
-    session.append('user/message', createUserMessage({
-        content: [{ type: 'text', text }],
-        source: { kind: 'plugin', plugin: '@crack/dsh-supermemory' },
-    }), { surfaceOp: 'append' });
-}
-
-/**
- * Inject the static context block once. The caller decides the session's
- * container + profile (snapshot at session creation); this only renders and
- * appends. Subagent sessions are skipped by the caller.
- */
-export function injectStaticContext(
-    ctx: Context,
-    session: Session,
-    container: string,
-    profile: string,
-): void {
-    appendContextMessage(session, contextMessageText(ctx, session, container, profile));
-}
-
 // ---------------------------------------------------------------------------
 // Per-message dynamic recall
 //
-// Deterministic sync search: cordis `ctx.emit()` dispatches session/event
-// handlers synchronously and does not await their returned promises, so an
-// async search can't be guaranteed to land before the prompt is assembled. We
-// therefore run the search SYNCHRONOUSLY (resident worker, or an inline `node
-// -e` subprocess fallback) so the cache is populated before emit returns.
+// The search must be SYNCHRONOUS: `systemPrompt.context()` text providers run
+// inside assembly, and cordis dispatches handlers synchronously without
+// awaiting returned promises, so an async search can't be guaranteed to have
+// landed before the snapshot is rendered. We therefore run the search
+// synchronously (resident worker, or an inline `node -e` subprocess fallback),
+// dedup by signature, and cache the hits per session.
 // ---------------------------------------------------------------------------
 
 interface RecallState {
@@ -119,15 +92,22 @@ export function clearRecallState(sessionId: string): void {
     recallCache.delete(sessionId);
 }
 
+interface RecallConfig {
+    recallTopK: number;
+    recallMaxChars: number;
+    recallThreshold: number;
+    recallEnabled: boolean;
+}
+
 function recallSearchSync(
     scope: SettingsScope<any>,
     container: string,
     query: string,
     limit: number,
+    threshold: number,
 ): Array<{ memory: string }> {
     try {
         const { base, apiKey } = requireUpstream(scope);
-        const threshold = resolveConfig(scope).recallThreshold;
         try {
             return searchWorker.search(base, apiKey, query, container, limit, threshold);
         } catch {
@@ -185,40 +165,94 @@ function recallSearchExec(
 }
 
 /**
- * Hook a real user message: normalize + dedup, then SYNCHRONOUSLY search into
- * cache and append the rendered recall (labelled context row). Returns the
- * number of hits injected (so the caller can log it). The injected message's
- * own `user/message` event is skipped by the caller (source is not "user"), so
- * this cannot recurse.
- *
- * `resolveContainer` maps a session to its active memory container (the caller
- * keeps the per-session snapshot; this module stays container-agnostic).
+ * Render the dynamic recall text for the current message, or '' when there is
+ * nothing to inject. Looks up the latest real user message (source.kind===
+ * "user") in the session's surface, dedups by signature, searches, and returns
+ * the bounded hit list. Called synchronously by the context text provider.
  */
-export function injectDynamicRecall(
+export function dynamicRecallText(
     scope: SettingsScope<any>,
     session: Session,
-    event: unknown,
-    resolveContainer: (session: Session) => string,
-): number {
-    const e = event as { type?: string; data?: { source?: { kind?: string }; content?: readonly unknown[] } };
-    if (e.data?.source?.kind !== 'user') return 0;
-    const text = messageText(e.data.content ?? []);
-    const norm = recallSignature(text);
-    if (!norm) return 0;
-    const cfg = resolveConfig(scope);
-    if (!cfg.recallEnabled) return 0;
+    container: string,
+    cfg: RecallConfig,
+): string {
+    if (!cfg.recallEnabled) return '';
+    const lastUser = lastUserText(session);
+    if (!lastUser) return '';
+    const norm = recallSignature(lastUser);
+    if (!norm) return '';
     const state = recallState(session.id);
-    let hits: Array<{ memory: string }>;
-    if (state.searched.has(norm)) {
-        hits = state.bySignature.get(norm) ?? [];
-    } else {
+    let hits: Array<{ memory: string }> | undefined = state.bySignature.get(norm);
+    if (hits === undefined) {
         state.searched.add(norm);
-        hits = recallSearchSync(scope, resolveContainer(session), norm, cfg.recallTopK);
+        hits = recallSearchSync(scope, container, norm, cfg.recallTopK, cfg.recallThreshold);
         if (hits.length > 0) state.bySignature.set(norm, hits);
     }
-    if (hits.length === 0) return 0;
-    const rendered = renderRecall(hits, cfg.recallTopK, cfg.recallMaxChars);
-    if (!rendered) return 0;
-    appendContextMessage(session, rendered);
-    return hits.length;
+    if (!hits || hits.length === 0) return '';
+    return renderRecall(hits, cfg.recallTopK, cfg.recallMaxChars);
+}
+
+/** The most recent real user-message text in the session surface, or ''. */
+function lastUserText(session: Session): string {
+    try {
+        return messageText(session.deriveMessages()
+            .filter((m) => m.role === 'user' && m.source?.kind === 'user')
+            .at(-1)?.content ?? []);
+    } catch {
+        return '';
+    }
+}
+
+/**
+ * Register the plugin's two context contributions through systemPrompt.context().
+ * `resolve` supplies the per-session container + static profile (caller owns
+ * those caches). Scope holds settings; `superCtx` is the plugin context for the
+ * environment block. Returns the disposers.
+ */
+export function registerMemoryContexts(
+    scopedCtx: { systemPrompt: { context(c: { name: string; order: number; text: (ctx: { agent?: { session?: Session } }) => string }): () => void } },
+    superCtx: Context,
+    scope: SettingsScope<any>,
+    resolve: (session?: Session) => { container: string; profile: string },
+): Array<() => void> {
+    const cfg = resolveConfig(scope);
+    const c: RecallConfig = {
+        recallEnabled: cfg.recallEnabled,
+        recallTopK: cfg.recallTopK,
+        recallMaxChars: cfg.recallMaxChars,
+        recallThreshold: cfg.recallThreshold,
+    };
+    const disposers: Array<() => void> = [];
+
+    // Static context (environment block + static profile) — head of the prompt.
+    disposers.push(scopedCtx.systemPrompt.context({
+        name: 'supermemory:environment',
+        order: 5,
+        text: (ctx) => {
+            const session = ctx.agent?.session;
+            if (!session || isSubagent(session)) return '';
+            const { container, profile } = resolve(session);
+            return staticContextText(superCtx, session, container, profile);
+        },
+    }));
+
+    // Dynamic recall — evaluated on every assembly, native-step timing.
+    disposers.push(scopedCtx.systemPrompt.context({
+        name: 'supermemory:recall',
+        order: 210,
+        text: (ctx) => {
+            const session = ctx.agent?.session;
+            if (!session || isSubagent(session)) return '';
+            const { container } = resolve(session);
+            return dynamicRecallText(scope, session, container, c);
+        },
+    }));
+
+    return disposers;
+}
+
+/** Skip subagent sessions for context contributions. */
+function isSubagent(session: Session): boolean {
+    return session.header.origin === 'subagent'
+        || (session.header.delegationDepth ?? 0) > 0;
 }

@@ -1,54 +1,69 @@
 /**
- * Deterministic memory-context injection for the model stream.
+ * Memory-context contributions registered through the native prompt channel.
  *
- * This is the plugin's own "context" channel: everything injected here is
- * appended as a dedicated `user/message` (source.kind = "plugin",
- * source.plugin = "@crack/dsh-supermemory") so the chat renders a
- * "Context injection @crack/dsh-supermemory" row and the message is present in
- * the model-visible surface on the very next `deriveMessages()` snapshot.
+ * This module provides the two `systemPrompt.context()` registrations the
+ * plugin contributes:
+ *   - STATIC context (environment block + static profile): set-once, sits at
+ *     the head of the conversation.
+ *   - DYNAMIC recall: on every assembly the current user message is searched
+ *     synchronously and the top hits are rendered.
  *
- * Two kinds of content:
- *   - STATIC context (environment block + static profile): assembled once per
- *     session (set-once), injected at session creation so it sits at the head
- *     of the conversation and is always in the surface. This replaces the old
- *     `systemPrompt.section()` registrations, which were rendered into the
- *     system role and therefore never showed up as a context row.
- *   - DYNAMIC recall: on every real user message a semantic search runs
- *     synchronously into a cache and the top hits are appended. Because the
- *     append is synchronous (see Session.append), the recall lands before the
- *     first `deriveMessages()` snapshot of that turn — so a single-step turn
- *     (no tool call) no longer drops it.
+ * Both flow through the agent-loop's normal assemble → project() path, so the
+ * timing is exactly the native step-level one: the agent-loop evaluates
+ * context on every step, and only appends a snapshot user/message when the
+ * rendered text changed (RuntimeContextProjection.project()). This is what
+ * makes the injection land before the first `deriveMessages()` of a turn and
+ * stay native-consistent across tool-call steps.
  *
- * Why not `systemPrompt.context()`: the agent-loop's RuntimeContextProjection
- * hardcodes the source plugin to @deepseek-ai/dsh-system-prompt, so anything
- * registered there cannot be labelled with our own plugin id. Appending our
- * own `user/message` is the only way to keep the @crack/dsh-supermemory label.
+ * Attribution: these join the native runtime-context snapshot, so their
+ * rendered row carries the native @deepseek-ai/dsh-system-prompt label (the
+ * agent-loop hardcodes the snapshot source). Names still use the "supermemory:"
+ * prefix so the sections are self-describing inside the snapshot.
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { Session } from '@deepseek-ai/dsh-session';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
 /**
  * Assemble the static context text: the dynamic environment block (cwd, git,
- * platform, shell, OS, uv) followed by the memory profile banner. Returns ''
- * when nothing is available to inject.
+ * platform, shell, OS, uv) followed by the memory profile banner. Called as
+ * the `text` provider for the static context registration.
  */
-export declare function contextMessageText(ctx: Context, session: Session, container: string, profile: string): string;
-/**
- * Inject the static context block once. The caller decides the session's
- * container + profile (snapshot at session creation); this only renders and
- * appends. Subagent sessions are skipped by the caller.
- */
-export declare function injectStaticContext(ctx: Context, session: Session, container: string, profile: string): void;
+export declare function staticContextText(ctx: Context, session: Session, container: string, profile: string): string;
 /** Release per-session recall state (call from session/disposed). */
 export declare function clearRecallState(sessionId: string): void;
+interface RecallConfig {
+    recallTopK: number;
+    recallMaxChars: number;
+    recallThreshold: number;
+    recallEnabled: boolean;
+}
 /**
- * Hook a real user message: normalize + dedup, then SYNCHRONOUSLY search into
- * cache and append the rendered recall (labelled context row). Returns the
- * number of hits injected (so the caller can log it). The injected message's
- * own `user/message` event is skipped by the caller (source is not "user"), so
- * this cannot recurse.
- *
- * `resolveContainer` maps a session to its active memory container (the caller
- * keeps the per-session snapshot; this module stays container-agnostic).
+ * Render the dynamic recall text for the current message, or '' when there is
+ * nothing to inject. Looks up the latest real user message (source.kind===
+ * "user") in the session's surface, dedups by signature, searches, and returns
+ * the bounded hit list. Called synchronously by the context text provider.
  */
-export declare function injectDynamicRecall(scope: SettingsScope<any>, session: Session, event: unknown, resolveContainer: (session: Session) => string): number;
+export declare function dynamicRecallText(scope: SettingsScope<any>, session: Session, container: string, cfg: RecallConfig): string;
+/**
+ * Register the plugin's two context contributions through systemPrompt.context().
+ * `resolve` supplies the per-session container + static profile (caller owns
+ * those caches). Scope holds settings; `superCtx` is the plugin context for the
+ * environment block. Returns the disposers.
+ */
+export declare function registerMemoryContexts(scopedCtx: {
+    systemPrompt: {
+        context(c: {
+            name: string;
+            order: number;
+            text: (ctx: {
+                agent?: {
+                    session?: Session;
+                };
+            }) => string;
+        }): () => void;
+    };
+}, superCtx: Context, scope: SettingsScope<any>, resolve: (session?: Session) => {
+    container: string;
+    profile: string;
+}): Array<() => void>;
+export {};

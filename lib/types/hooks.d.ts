@@ -1,15 +1,11 @@
 /**
  * Deterministic session hooks:
- *  - session/created -> snapshot the container + fetch profile into cache, then
- *    inject the static context block (environment + static profile) as one
- *    labelled `user/message` via context-inject.ts, so it sits at the head of
- *    the conversation and is always in the model-visible surface.
- *  - user/message -> per-message dynamic recall (context-inject.ts): dedupe +
- *    synchronously search the message, then append it as a dedicated
- *    `user/message` (source.kind = "plugin", source.plugin =
- *    "@crack/dsh-supermemory") so the chat renders a "Context injection
- *    @crack/dsh-supermemory" row; the injected message's own event is skipped
- *    (source is not "user"), so it cannot recurse.
+ *  - session/created -> snapshot the container + fetch profile into a cache
+ *    the context text provider reads synchronously on the first model step.
+ *  - systemPrompt.context() registrations (context-inject.ts) -> the static
+ *    environment+profile block and the per-message dynamic recall both flow
+ *    through the native assemble -> project() step-level path, so they land
+ *    before the turn's first deriveMessages() and use native dedup timing.
  *  - turn/end -> accumulate the turn transcript and PATCH it into the
  *    session's single supermemory document (each session owns one doc).
  *    Subagent sessions are skipped for all of the above.
@@ -28,5 +24,5 @@ export interface SessionDocState {
     /** True while a PATCH is in flight — skip new turns until it settles. */
     patching: boolean;
 }
-/** Register the session hooks (context injection + turn persistence). */
+/** Register the session hooks (context registration + turn persistence). */
 export declare function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): Array<() => void>;

@@ -1,15 +1,11 @@
 /**
  * Deterministic session hooks:
- *  - session/created -> snapshot the container + fetch profile into cache, then
- *    inject the static context block (environment + static profile) as one
- *    labelled `user/message` via context-inject.ts, so it sits at the head of
- *    the conversation and is always in the model-visible surface.
- *  - user/message -> per-message dynamic recall (context-inject.ts): dedupe +
- *    synchronously search the message, then append it as a dedicated
- *    `user/message` (source.kind = "plugin", source.plugin =
- *    "@crack/dsh-supermemory") so the chat renders a "Context injection
- *    @crack/dsh-supermemory" row; the injected message's own event is skipped
- *    (source is not "user"), so it cannot recurse.
+ *  - session/created -> snapshot the container + fetch profile into a cache
+ *    the context text provider reads synchronously on the first model step.
+ *  - systemPrompt.context() registrations (context-inject.ts) -> the static
+ *    environment+profile block and the per-message dynamic recall both flow
+ *    through the native assemble -> project() step-level path, so they land
+ *    before the turn's first deriveMessages() and use native dedup timing.
  *  - turn/end -> accumulate the turn transcript and PATCH it into the
  *    session's single supermemory document (each session owns one doc).
  *    Subagent sessions are skipped for all of the above.
@@ -22,7 +18,7 @@ import { fetchProfile } from './containers.ts';
 import { turnTranscript } from './transcript.ts';
 import { ensureWslProbe } from './environment.ts';
 import { apiFetch } from './upstream.ts';
-import { injectStaticContext, injectDynamicRecall, clearRecallState } from './context-inject.ts';
+import { registerMemoryContexts, clearRecallState } from './context-inject.ts';
 
 // ---------------------------------------------------------------------------
 // Session-scoped container snapshot
@@ -261,32 +257,53 @@ function isSubagent(session: Session): boolean {
 // ---------------------------------------------------------------------------
 // Injection orchestration
 //
-// Static context (environment + static profile) and per-message dynamic recall
-// both live in context-inject.ts. This module only decides WHEN they run and
-// resolves the session state (container snapshot, profile cache) they need.
+// The static context block and per-message dynamic recall are registered as
+// systemPrompt.context() contributions (context-inject.ts) so they flow through
+// the native assemble → project() step-level path. This module only decides the
+// per-session state those text providers read synchronously: the container
+// snapshot and the static profile cache.
 // ---------------------------------------------------------------------------
+
+/** Cached static-profile text per session (read by the context text provider). */
+const sessionProfileCache = new Map<string, string>();
 
 /** Resolve a session's active memory container (session snapshot \|\| global). */
 function sessionContainerFor(session: Session, scope: SettingsScope<any>): string {
     return sessionContainerRef.get(session.id) ?? activeContainer(scope);
 }
 
-/** Register the session hooks (context injection + turn persistence). */
+/** Register the session hooks (context registration + turn persistence). */
 export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): Array<() => void> {
     const disposers: Array<() => void> = [];
+
+    // Register the two context contributions through the native prompt channel.
+    // `resolve` reads the per-session caches the session/created hook fills.
+    ctx.inject(['systemPrompt'], (scopedCtx) => {
+        disposers.push(...registerMemoryContexts(scopedCtx, ctx, scope, (session) => {
+            const sid = session?.id ?? '';
+            return {
+                container: sessionContainerFor(session!, scope),
+                profile: session ? (sessionProfileCache.get(session.id) ?? '') : '',
+            };
+        }));
+        // Re-evaluate config snapshots when settings change (recall tuning).
+        disposers.push(ctx.on('settings/document-updated', () => {
+            /* config is read per-assembly via resolveConfig; nothing to cache here */
+        }));
+    });
 
     // Release per-session state when a session leaves the store.
     disposers.push(ctx.on('session/disposed', (session) => {
         sessionContainerRef.delete(session.id);
+        sessionProfileCache.delete(session.id);
         sessionWorkspaceRef.delete(session.id);
         workspaceResolving.delete(session.id);
         sessionDocRef.delete(session.id);
         clearRecallState(session.id);
     }));
 
-    // ── Session init: warm WSL probe, snapshot container, fetch profile, then
-    //    inject the static context block (environment + static profile) as one
-    //    labelled user/message so it is always in the model-visible surface.
+    // ── Session init: warm WSL probe, snapshot container, fetch profile into
+    //    the cache the context text provider reads synchronously on each step.
     disposers.push(ctx.on('session/created', (session) => {
         if (isSubagent(session)) return;
         // Warm the WSL environment probe NOW (synchronously, before the first
@@ -312,8 +329,8 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
                     catch { /* upstream may still be booting */ }
                     await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
                 }
-                if (!recovered) {
-                    injectStaticContext(ctx, session, active, profileText);
+                if (profileText) {
+                    sessionProfileCache.set(session.id, profileText);
                 }
                 // Pre-init the session document state so the first turn's PATCH
                 // logic has a stable entry (not strictly required, but keeps a
@@ -325,12 +342,15 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
         })();
     }));
 
-    // ── Turn persistence + per-message dynamic recall ─────────────────────
+    // ── Turn persistence + per-message dynamic recall logging ─────────────
+    //
+    // Dynamic recall is NOT appended here anymore — it is a context
+    // contribution evaluated by the native step-level assembly, so it lands
+    // before the first deriveMessages() of the turn. This handler only logs
+    // the hit count for diagnostics and (on turn/end) persists the transcript.
     disposers.push(ctx.on('session/event', (session, event) => {
         if (isSubagent(session)) return;
         if (event.type === 'user/message') {
-            const hits = injectDynamicRecall(scope, session, event, (s) => sessionContainerFor(s, scope));
-            ctx.logger.debug(`[supermemory:recall] session=${session.id} hits=${hits}`);
             return;
         }
         if (event.type !== 'turn/end') return;
