@@ -15,9 +15,17 @@ test('clampTopK: clamps into [1,10]', () => {
     assert.equal(clampTopK(4), 4);
 });
 
-test('renderRecall: empty hits => empty string', () => {
-    assert.equal(renderRecall([], 4, 1600), '');
-    assert.equal(renderRecall(undefined, 4, 1600), '');
+test('renderRecall: empty hits default to a "no memories" placeholder block', () => {
+    const out = renderRecall([], 4, 1600);
+    assert.ok(out.includes('UNTRUSTED historical data'));
+    assert.ok(out.includes('目前无相关记忆'), 'empty recall must render a placeholder, not silently omit');
+    const undef = renderRecall(undefined, 4, 1600);
+    assert.ok(undef.includes('目前无相关记忆'));
+});
+
+test('renderRecall: emptyText="" restores the old drop-on-empty behaviour', () => {
+    assert.equal(renderRecall([], 4, 1600, ''), '');
+    assert.equal(renderRecall(undefined, 4, 1600, ''), '');
 });
 
 test('renderRecall: marks block untrusted, caps topK', () => {
