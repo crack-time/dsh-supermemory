@@ -3,18 +3,22 @@
  *  - session/created -> snapshot the container + fetch profile into cache;
  *    the systemPrompt.context() registration reads the cache synchronously
  *    on every model step, so no agent.inject() is needed.
+ *  - user/message -> per-message dynamic recall: dedupe + async-search the
+ *    message and cache hits; the `supermemory:recall-dynamic` section injects
+ *    them (bounded, marked untrusted) right after the static profile.
  *  - turn/end -> accumulate the turn transcript and PATCH it into the
  *    session's single supermemory document (each session owns one doc).
- *    Subagent sessions are skipped for both hooks.
+ *    Subagent sessions are skipped for all of the above.
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { Session } from '@deepseek-ai/dsh-session';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
-import { activeContainer, requireUpstream } from './config.ts';
+import { activeContainer, requireUpstream, resolveConfig } from './config.ts';
 import { fetchProfile } from './containers.ts';
-import { turnTranscript } from './transcript.ts';
+import { messageText, turnTranscript } from './transcript.ts';
 import { environmentBlock, ensureWslProbe } from './environment.ts';
 import { apiFetch } from './upstream.ts';
+import { recallSignature, renderRecall } from './recall.ts';
 
 // ---------------------------------------------------------------------------
 // Context injection via systemPrompt.context()
@@ -263,6 +267,105 @@ function isSubagent(session: Session): boolean {
         || (session.header.delegationDepth ?? 0) > 0;
 }
 
+// ---------------------------------------------------------------------------
+// Per-message dynamic recall
+//
+// The static profile section (`supermemory:recall`, order 200) is fetched once
+// at session/created — it answers "who is this user". Dynamic recall is the
+// per-message complement: on every real user message we run a semantic search
+// and cache the hits (deduped + bounded), and the `supermemory:recall-dynamic`
+// section (order 210) injects them right after the profile. The render path is
+// a pure read of the cache — it never blocks on the upstream.
+// ---------------------------------------------------------------------------
+
+interface RecallState {
+    /** Normalized user-message texts already searched this session (dedup). */
+    searched: Set<string>;
+    /** Search hits keyed by the normalized message text. */
+    bySignature: Map<string, Array<{ memory: string }>>;
+}
+
+const recallCache = new Map<string, RecallState>();
+
+function recallState(sessionId: string): RecallState {
+    let state = recallCache.get(sessionId);
+    if (!state) {
+        state = { searched: new Set(), bySignature: new Map() };
+        recallCache.set(sessionId, state);
+    }
+    return state;
+}
+
+/** Semantic search over the active container; never throws. */
+async function recallSearch(
+    scope: SettingsScope<any>,
+    container: string,
+    query: string,
+    limit: number,
+): Promise<Array<{ memory: string }>> {
+    try {
+        const { base, apiKey } = requireUpstream(scope);
+        const data = await apiFetch<{
+            memories?: Array<{ memory?: string }>;
+            results?: Array<{ memory?: string }>;
+        }>(base, apiKey, '/v4/search', {
+            method: 'POST',
+            body: { q: query, containerTag: container, threshold: 0.5, limit },
+            timeoutMs: 8000,
+        });
+        return (data.memories ?? data.results ?? [])
+            .map((m) => ({ memory: m.memory ?? '' }))
+            .filter((m) => m.memory.length > 0);
+    } catch { /* upstream down — silently skip recall for this message */ }
+    return [];
+}
+
+/** Hook a real user message: normalize, dedup, then async-search into cache. */
+function kickRecallSearch(scope: SettingsScope<any>, session: Session, event: unknown): void {
+    const e = event as { type?: string; data?: { source?: { kind?: string }; content?: readonly unknown[] } };
+    if (e.data?.source?.kind !== 'user') return;
+    const text = messageText(e.data.content ?? []);
+    const norm = recallSignature(text);
+    if (!norm) return;
+    const cfg = resolveConfig(scope);
+    if (!cfg.recallEnabled) return;
+    const state = recallState(session.id);
+    if (state.searched.has(norm)) return; // dedup this message this session
+    state.searched.add(norm);
+    const container = sessionContainerRef.get(session.id) ?? activeContainer(scope);
+    const topK = cfg.recallTopK;
+    void recallSearch(scope, container, norm, topK).then((hits) => {
+        if (hits.length > 0) state.bySignature.set(norm, hits);
+    });
+}
+
+/** Find the current user message's normalized text from the event log. */
+function currentRecallSignature(session: Session): string | undefined {
+    const events = session.snapshotEvents();
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+        const e = events[i];
+        if (!e || e.type !== 'user/message') continue;
+        const src = (e.data as { source?: { kind?: string } }).source;
+        if (src?.kind !== 'user') continue;
+        const text = messageText((e.data as { content: readonly unknown[] }).content);
+        const norm = recallSignature(text);
+        if (norm) return norm;
+    }
+    return undefined;
+}
+
+/** Render the cached hits for the current message — pure read, bounded, marked untrusted. */
+function recallDynamicText(scope: SettingsScope<any>, session: Session): string {
+    const state = recallCache.get(session.id);
+    if (!state) return '';
+    const sig = currentRecallSignature(session);
+    if (!sig) return '';
+    const hits = state.bySignature.get(sig);
+    if (!hits || hits.length === 0) return '';
+    const cfg = resolveConfig(scope);
+    return renderRecall(hits, cfg.recallTopK, cfg.recallMaxChars);
+}
+
 /** Register the systemPrompt.context() + session hooks. */
 export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): Array<() => void> {
     const disposers: Array<() => void> = [];
@@ -294,6 +397,15 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
                     '\n\n[SYSTEM INSTRUCTION] Memory queries default to the active memory space above.';
             },
         }));
+        disposers.push(scopedCtx.systemPrompt.context({
+            name: 'supermemory:recall-dynamic',
+            order: 210,
+            text: (context: { agent?: { session?: Session } }) => {
+                const session = context.agent?.session;
+                if (!session || isSubagent(session)) return '';
+                return recallDynamicText(scope, session);
+            },
+        }));
     });
 
     // Release per-session state when a session leaves the store.
@@ -303,6 +415,7 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
         sessionWorkspaceRef.delete(session.id);
         workspaceResolving.delete(session.id);
         sessionDocRef.delete(session.id);
+        recallCache.delete(session.id);
     }));
 
     // ── Session init: warm WSL probe, snapshot container, fetch profile ──
@@ -344,9 +457,13 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
         })();
     }));
 
-    // ── Turn persistence ────────────────────────────────────────────────
+    // ── Turn persistence + per-message dynamic recall ─────────────────────
     disposers.push(ctx.on('session/event', (session, event) => {
         if (isSubagent(session)) return;
+        if (event.type === 'user/message') {
+            kickRecallSearch(scope, session, event);
+            return;
+        }
         if (event.type !== 'turn/end') return;
         const turn = (event.data as { turn: number }).turn;
         const transcript = turnTranscript(session, turn);

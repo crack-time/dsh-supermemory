@@ -24,6 +24,11 @@ export interface SupermemoryConfig {
     openaiModel: string;
     /** Currently selected memory container tag (persisted across sessions). */
     activeContainer: string;
+    /** Per-message dynamic recall: search on every user message and inject the
+     *  top hits. Defaults keep the block bounded and cheap. */
+    recallEnabled: boolean;
+    recallTopK: number;
+    recallMaxChars: number;
 }
 /** Settings namespace schema: where to reach the local Supermemory server. */
 export declare const SUPERMEMORY_SCHEMA: z<Schemastery.ObjectS<{
@@ -34,6 +39,9 @@ export declare const SUPERMEMORY_SCHEMA: z<Schemastery.ObjectS<{
     openaiBaseUrl: z<string, string>;
     openaiModel: z<string, string>;
     activeContainer: z<string, string>;
+    recallEnabled: z<boolean, boolean>;
+    recallTopK: z<number, number>;
+    recallMaxChars: z<number, number>;
 }>, Schemastery.ObjectT<{
     baseUrl: z<string, string>;
     apiKey: z<string, string>;
@@ -42,6 +50,9 @@ export declare const SUPERMEMORY_SCHEMA: z<Schemastery.ObjectS<{
     openaiBaseUrl: z<string, string>;
     openaiModel: z<string, string>;
     activeContainer: z<string, string>;
+    recallEnabled: z<boolean, boolean>;
+    recallTopK: z<number, number>;
+    recallMaxChars: z<number, number>;
 }>>;
 /** Resolve the effective configuration from a settings scope. */
 export declare function resolveConfig(scope: SettingsScope<any>): SupermemoryConfig;

@@ -7,6 +7,8 @@
  * signatures are captured.
  */
 import type { Session } from '@deepseek-ai/dsh-session';
+/** Extract the plain-text segments from a message content blocks. */
+export declare function messageText(content: readonly unknown[]): string;
 /**
  * Compose the transcript of one finished turn into a self-contained document.
  *

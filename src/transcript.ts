@@ -9,7 +9,7 @@
 import type { Session } from '@deepseek-ai/dsh-session';
 
 /** Extract the plain-text segments from a message content blocks. */
-function messageText(content: readonly unknown[]): string {
+export function messageText(content: readonly unknown[]): string {
     return content
         .map((block): string => {
             const b = block as { type?: string; text?: string; content?: unknown };

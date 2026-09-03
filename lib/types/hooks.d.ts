@@ -3,9 +3,12 @@
  *  - session/created -> snapshot the container + fetch profile into cache;
  *    the systemPrompt.context() registration reads the cache synchronously
  *    on every model step, so no agent.inject() is needed.
+ *  - user/message -> per-message dynamic recall: dedupe + async-search the
+ *    message and cache hits; the `supermemory:recall-dynamic` section injects
+ *    them (bounded, marked untrusted) right after the static profile.
  *  - turn/end -> accumulate the turn transcript and PATCH it into the
  *    session's single supermemory document (each session owns one doc).
- *    Subagent sessions are skipped for both hooks.
+ *    Subagent sessions are skipped for all of the above.
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
