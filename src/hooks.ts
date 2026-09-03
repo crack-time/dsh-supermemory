@@ -19,8 +19,12 @@ import { activeContainer, requireUpstream, resolveConfig } from './config.ts';
 import { fetchProfile } from './containers.ts';
 import { messageText, turnTranscript } from './transcript.ts';
 import { environmentBlock, ensureWslProbe } from './environment.ts';
+import { SearchWorker } from './search-worker.ts';
 import { apiFetch } from './upstream.ts';
 import { recallSignature, renderRecall } from './recall.ts';
+
+/** One persistent search worker shared by every session (spawned on first use). */
+const searchWorker = new SearchWorker();
 
 // ---------------------------------------------------------------------------
 // Context injection via systemPrompt.context()
@@ -317,6 +321,24 @@ function recallSearchSync(
 ): Array<{ memory: string }> {
     try {
         const { base, apiKey } = requireUpstream(scope);
+        try {
+            return searchWorker.search(base, apiKey, query, container, limit);
+        } catch {
+            return recallSearchExec(base, apiKey, query, container, limit);
+        }
+    } catch { /* no key / upstream unreachable — silently skip recall */ }
+    return [];
+}
+
+/** One-shot synchronous search via a temporary `node -e` subprocess (fallback). */
+function recallSearchExec(
+    base: string,
+    apiKey: string,
+    query: string,
+    container: string,
+    limit: number,
+): Array<{ memory: string }> {
+    try {
         const script =
             '(async () => {\n' +
             '  const base = process.env.SM_BASE;\n' +
@@ -351,7 +373,7 @@ function recallSearchSync(
         return (data.memories ?? data.results ?? [])
             .map((m) => ({ memory: m.memory ?? '' }))
             .filter((m) => m.memory.length > 0);
-    } catch { /* upstream down / no key / timeout — silently skip recall for this message */ }
+    } catch { /* upstream down / timeout — silently skip recall for this message */ }
     return [];
 }
 
