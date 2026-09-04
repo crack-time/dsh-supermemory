@@ -23,6 +23,7 @@ import type { SettingsScope } from '@deepseek-ai/dsh-settings';
 import { activeContainer, requireUpstream } from './config.ts';
 import { fetchProfile } from './containers.ts';
 import { sessionTranscript } from './transcript.ts';
+import { compactTranscript } from './compact.ts';
 import { ensureWslProbe } from './environment.ts';
 import { apiFetch, listDocumentPages } from './upstream.ts';
 import { registerMemoryContexts, clearRecallState, prewarmRecall, bindRecall, recallConfigOf } from './context-inject.ts';
@@ -208,10 +209,20 @@ async function persistSessionAtArchive(
     // reads the (optional) cwd header. Live sessions carry their header; cold
     // sessions have none, which just leaves workspace undefined.
     const fake = { id: sessionId, snapshotEvents: source.snapshotEvents } as Session;
-    const text = sessionTranscript(fake);
+    let text = sessionTranscript(fake);
     if (!text) {
         ctx.logger.warn('supermemory archive: empty transcript for session ' + sessionId);
         return;
+    }
+    // Content-aware compaction: the deterministic layer already stripped tool
+    // args; this optional LLM pass condenses the user/assistant narrative into
+    // a denser record. Non-fatal — on any failure the original is kept.
+    const compact = await compactTranscript(scope, text);
+    if (compact.compacted) {
+        ctx.logger.debug(
+            'supermemory archive: compacted session ' + sessionId + ' ' + text.length + ' -> ' + compact.text.length + ' chars',
+        );
+        text = compact.text;
     }
     const { base, apiKey } = requireUpstream(scope);
     const containerTag = sessionContainerRef.get(sessionId) ?? activeContainer(scope);
