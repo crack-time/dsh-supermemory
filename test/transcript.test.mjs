@@ -29,7 +29,8 @@ test('turnTranscript: extracts user/assistant/tool, skips injected, stops at tur
     ];
     const out = turnTranscript(fakeSession(events), 1);
     assert.ok(out.includes('User:\nHow does uv cache work?'));
-    assert.ok(out.includes('[tool] supermemory_search({"query":"uv cache"})'));
+    assert.ok(out.includes('[tool] supermemory_search'), 'tool args are not captured — name only');
+    assert.ok(!out.includes('{"query":"uv cache"}'), 'tool arguments must be stripped');
     assert.ok(out.includes('Assistant:\nIt caches under ~/.cache/uv.'));
     assert.ok(!out.includes('injected'), 'injected/synthetic messages must be excluded');
     assert.ok(!out.includes('User:\n[system'), 'non-user-source blocked not included');
@@ -75,14 +76,15 @@ test('sessionTranscript: skips injected messages and tool results, captures tool
     ];
     const out = sessionTranscript(fakeSession(events));
     assert.ok(out.includes('User:\nreal question'));
-    assert.ok(out.includes('[tool] supermemory_search({})'));
+    assert.ok(out.includes('[tool] supermemory_search'));
+    assert.ok(!out.includes('{}'), 'tool arguments must be stripped in session transcript');
     assert.ok(out.includes('Assistant:\nreal answer'));
     assert.ok(!out.includes('injected'), 'injected/synthetic content must be excluded');
 });
 
-test('sessionTranscript: empty session yields empty string; respects maxChars', () => {
+test('sessionTranscript: empty session yields empty string; no hard truncation', () => {
     assert.equal(sessionTranscript(fakeSession([])), '');
-    const events = [turnStart(1), userMsg('a'.repeat(300)), asstMsg('b'.repeat(300)), turnEnd(1)];
-    const out = sessionTranscript(fakeSession(events), 100);
-    assert.ok(out.length <= 100);
+    const events = [turnStart(1), userMsg('a'.repeat(400)), asstMsg('b'.repeat(400)), turnEnd(1)];
+    const out = sessionTranscript(fakeSession(events));
+    assert.ok(out.length >= 800, 'session transcript must not be truncated');
 });

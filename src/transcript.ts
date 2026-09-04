@@ -58,10 +58,11 @@ export function turnTranscript(session: Session, turn: number, maxChars = 6000):
  * Unlike turnTranscript (one turn, backward scan + break at turn/end), this
  * walks the whole log forward and keeps going across turn boundaries, so it is
  * suitable for the archive-time write where the session's complete span is
- * needed regardless of how memory- resident or cold the session is.
+ * needed regardless of how memory-resident or cold the session is. No
+ * hard truncation is applied: value is judged by content, not length.
  */
-export function sessionTranscript(session: Session, maxChars = 6000): string {
-    return composeEvents(session.snapshotEvents() as readonly SessionLogEvent[], 0, maxChars, false);
+export function sessionTranscript(session: Session): string {
+    return composeEvents(session.snapshotEvents() as readonly SessionLogEvent[], 0, Number.POSITIVE_INFINITY, false);
 }
 
 /** Render one session event span into its transcript text; '' when nothing captured. */
@@ -92,8 +93,10 @@ function composeEvents(
             if (text.length > 0) parts.push('Assistant:\n' + text);
         }
         else if (e.type === 'tool/call') {
-            const d = e.data as { name: string; arguments: string };
-            parts.push('[tool] ' + d.name + '(' + d.arguments + ')');
+            const d = e.data as { name: string };
+            // Keep only the tool name — arguments (code, paths, JSON) are
+            // implementation noise that carry no reasoning value.
+            parts.push('[tool] ' + d.name);
         }
     }
     const text = parts.join('\n\n').trim();

@@ -40,14 +40,6 @@ import { isSubagent } from './session-util.ts';
  */
 const sessionContainerRef = new Map<string, string>();
 
-/**
- * Discard an archived session when its recomputed transcript is shorter than
- * this (characters). Short sessions (greetings, one-liners, brief Q&A) carry
- * no durable signal worth ingesting and would only re-trigger the upstream
- * LLM filter for near-zero value.
- */
-export const MIN_ARCHIVE_SESSION_CHARS = 10000;
-
 /** Look up the container a session was bound to at creation time. */
 export function getSessionContainer(sessionId: string): string | undefined {
     return sessionContainerRef.get(sessionId);
@@ -219,15 +211,6 @@ async function persistSessionAtArchive(
     const text = sessionTranscript(fake);
     if (!text) {
         ctx.logger.warn('supermemory archive: empty transcript for session ' + sessionId);
-        return;
-    }
-    // Skip tiny / ephemeral sessions: below the floor they hold no durable
-    // signal worth ingesting (greetings, one-liners), and writing them would
-    // only re-trigger the upstream LLM filter for near-zero value.
-    if (text.length < MIN_ARCHIVE_SESSION_CHARS) {
-        ctx.logger.debug(
-            'supermemory archive: skip session ' + sessionId + ' (' + text.length + ' chars < ' + MIN_ARCHIVE_SESSION_CHARS + ')',
-        );
         return;
     }
     const { base, apiKey } = requireUpstream(scope);

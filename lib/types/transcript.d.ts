@@ -18,6 +18,7 @@ export declare function turnTranscript(session: Session, turn: number, maxChars?
  * Unlike turnTranscript (one turn, backward scan + break at turn/end), this
  * walks the whole log forward and keeps going across turn boundaries, so it is
  * suitable for the archive-time write where the session's complete span is
- * needed regardless of how memory- resident or cold the session is.
+ * needed regardless of how memory-resident or cold the session is. No
+ * hard truncation is applied: value is judged by content, not length.
  */
-export declare function sessionTranscript(session: Session, maxChars?: number): string;
+export declare function sessionTranscript(session: Session): string;
