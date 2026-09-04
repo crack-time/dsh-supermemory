@@ -46,7 +46,7 @@ const sessionContainerRef = new Map<string, string>();
  * no durable signal worth ingesting and would only re-trigger the upstream
  * LLM filter for near-zero value.
  */
-export const MIN_ARCHIVE_SESSION_CHARS = 20000;
+export const MIN_ARCHIVE_SESSION_CHARS = 10000;
 
 /** Look up the container a session was bound to at creation time. */
 export function getSessionContainer(sessionId: string): string | undefined {

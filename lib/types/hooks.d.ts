@@ -25,7 +25,7 @@ import type { SettingsScope } from '@deepseek-ai/dsh-settings';
  * no durable signal worth ingesting and would only re-trigger the upstream
  * LLM filter for near-zero value.
  */
-export declare const MIN_ARCHIVE_SESSION_CHARS = 20000;
+export declare const MIN_ARCHIVE_SESSION_CHARS = 10000;
 /** Look up the container a session was bound to at creation time. */
 export declare function getSessionContainer(sessionId: string): string | undefined;
 /** Override the session container snapshot (used by the input-bar selector). */
