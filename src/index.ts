@@ -23,7 +23,9 @@ import type {} from '@deepseek-ai/dsh-host-webserver';
 import type { Context } from '@deepseek-ai/cordis';
 // Type-only merge: ctx.workspaceRegistry.
 import type {} from '@deepseek-ai/dsh-workspace';
-// Type-only merge: ctx.sessionPersistence (cold session reads at archive time).
+// Type-only merge: ctx.sessions (live session store) + ctx.sessionPersistence
+// (cold session reads at archive time).
+import type {} from '@deepseek-ai/dsh-session';
 import type {} from '@deepseek-ai/dsh-session-persistence';
 import { registerSupermemorySettings } from './config.ts';
 import { ManagedServer } from './managed-server.ts';
@@ -32,8 +34,8 @@ import { registerMemoryTools } from './tools/index.ts';
 import { registerSessionHooks, prewarmProfile } from './hooks.ts';
 import { prewarmWslProbes, setProbeLog } from './environment.ts';
 
-/** Required services: the web route registry, the user-settings seam, the tool registry, the workspace resolver, the prompt-context system, the shell executor and session persistence (cold archive-time reads). */
-const inject = ['webServer', 'settings', 'tools', 'workspaceRegistry', 'systemPrompt', 'shell', 'sessionPersistence'];
+/** Required services: the web route registry, the user-settings seam, the tool registry, the workspace resolver, the prompt-context system, the shell executor, the live session store and session persistence (cold archive-time reads). */
+const inject = ['webServer', 'settings', 'tools', 'workspaceRegistry', 'systemPrompt', 'shell', 'sessions', 'sessionPersistence'];
 
 function apply(ctx: Context): void {
     // "supermemory" settings namespace: dsh rc.7 renders it as a settings card
