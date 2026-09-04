@@ -23,9 +23,12 @@ export declare function filterSearchHits(raw: ReadonlyArray<unknown>, threshold:
     memory: string;
 }>;
 /**
- * Render cached hits as an untrusted memory block, or an empty string when
- * there are no hits. `topK` caps the number of memories, `maxChars` the total.
+ * Render cached hits as an untrusted memory block. When there are no hits,
+ * render a page block whose body is `emptyText` — normally a short "no relevant
+ * memories" note — so an empty recall is never a silent omission (the message
+ * still gets a block). Pass `emptyText` as '' to keep the old drop-on-empty
+ * behaviour. `topK` caps the number of memories, `maxChars` the total.
  */
 export declare function renderRecall(hits: ReadonlyArray<{
     memory: string;
-}>, topK: number, maxChars: number): string;
+}>, topK: number, maxChars: number, emptyText?: string): string;

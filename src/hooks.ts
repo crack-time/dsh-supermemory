@@ -1,11 +1,15 @@
 /**
  * Deterministic session hooks:
- *  - session/created -> snapshot the container + fetch profile into a cache
- *    the context text provider reads synchronously on the first model step.
- *  - systemPrompt.context() registrations (context-inject.ts) -> the static
- *    environment+profile block and the per-message dynamic recall both flow
- *    through the native assemble -> project() step-level path, so they land
- *    before the turn's first deriveMessages() and use native dedup timing.
+ *  - activation -> pre-warm the active container's static profile into a global
+ *    cache (see prewarmProfile); a session/created fallback tops up a container
+ *    that changed after boot. The context text provider reads this cache
+ *    synchronously on the first model step.
+ *  - agent/inbox/inserted|claimed -> drive per-message dynamic recall: prewarm
+ *    the search at insert (pinning the send path until it lands) and bind the
+ *    claimed message so the context text provider renders its recall from cache.
+ *  - systemPrompt.context() registrations (context-inject.ts) -> static
+ *    environment+profile and per-message recall flow through the native
+ *    assemble → project() step-level path.
  *  - turn/end -> accumulate the turn transcript and PATCH it into the
  *    session's single supermemory document (each session owns one doc).
  *    Subagent sessions are skipped for all of the above.
@@ -18,7 +22,7 @@ import { fetchProfile } from './containers.ts';
 import { turnTranscript } from './transcript.ts';
 import { ensureWslProbe } from './environment.ts';
 import { apiFetch } from './upstream.ts';
-import { registerMemoryContexts, clearRecallState } from './context-inject.ts';
+import { registerMemoryContexts, clearRecallState, prewarmRecall, bindRecall, recallConfigOf } from './context-inject.ts';
 
 // ---------------------------------------------------------------------------
 // Session-scoped container snapshot
@@ -239,8 +243,21 @@ function isSubagent(session: Session): boolean {
 // snapshot and the static profile cache.
 // ---------------------------------------------------------------------------
 
-/** Cached static-profile text per session (read by the context text provider). */
-const sessionProfileCache = new Map<string, string>();
+/** Static-profile text per container (read by the context text provider).
+ *  Pre-warmed at plugin activation (see prewarmProfile) so a brand-new session
+ *  on the active container already has a stable profile on its first step —
+ *  removing the old per-session async fetch that raced the first assembly. */
+const profileByContainer = new Map<string, string>();
+
+/** Pre-warm the active container's static profile once (fire-and-forget). */
+export async function prewarmProfile(scope: SettingsScope<any>): Promise<void> {
+    try {
+        const tag = activeContainer(scope);
+        if (profileByContainer.has(tag)) return;
+        const text = await fetchProfile(scope, tag);
+        if (text) profileByContainer.set(tag, text);
+    } catch { /* upstream may still be booting — session/created will retry */ }
+}
 
 /** Resolve a session's active memory container (session snapshot \|\| global). */
 function sessionContainerFor(session: Session, scope: SettingsScope<any>): string {
@@ -252,28 +269,69 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
     const disposers: Array<() => void> = [];
 
     // Register the two context contributions through the native prompt channel.
-    // `resolve` reads the per-session caches the session/created hook fills.
+    // `resolve` reads the per-container profile cache the activation prewarm + a
+    // `session/created` fallback fill, plus the per-session container snapshot.
     ctx.inject(['systemPrompt'], (scopedCtx) => {
         disposers.push(...registerMemoryContexts(scopedCtx, ctx, scope, (session) => {
+            const container = sessionContainerFor(session!, scope);
             return {
-                container: sessionContainerFor(session!, scope),
-                profile: session ? (sessionProfileCache.get(session.id) ?? '') : '',
+                container,
+                profile: profileByContainer.get(container) ?? '',
             };
         }));
     });
 
+    // ── Inbox-driven dynamic recall ────────────────────────────────────────
+    //
+    // The message body is available here (before assembly) via the native inbox
+    // splice/claim notifications:
+    //   - `agent/inbox/inserted` fires when a message enters a pending inbox
+    //     list (as the user sends it). We synchronously search it and cache by
+    //     signature — this deliberately pins the send path until the search
+    //     lands ("make the agent busy until the search is done"), so the agent
+    //     wakes with the cache warm.
+    //   - `agent/inbox/claimed` fires right before the step's assembly. We bind
+    //     the claimed message so the context text provider (dynamicRecallText)
+    //     renders ITS recall by a pure cache read while assembling.
+    // Both skip subagent sessions and non-user messages.
+    disposers.push(ctx.on('agent/inbox/inserted', (payload) => {
+        try {
+            const p = payload as { agent?: { session?: Session }; message?: { source?: { kind?: string }; content?: readonly unknown[] } };
+            const session = p.agent?.session;
+            if (!session || isSubagent(session)) return;
+            if (p.message?.source?.kind !== 'user') return;
+            const cfg = recallConfigOf(scope);
+            if (!cfg.recallEnabled) return;
+            prewarmRecall(scope, session, sessionContainerFor(session, scope), cfg, p.message.content ?? []);
+        }
+        catch (error) { ctx.logger.warn('supermemory inbox prewarm:', error); }
+    }));
+    disposers.push(ctx.on('agent/inbox/claimed', (payload) => {
+        try {
+            const p = payload as { agent?: { session?: Session }; message?: { source?: { kind?: string }; content?: readonly unknown[] } };
+            const session = p.agent?.session;
+            if (!session || isSubagent(session)) return;
+            if (p.message?.source?.kind !== 'user') return;
+            const cfg = recallConfigOf(scope);
+            if (!cfg.recallEnabled) return;
+            bindRecall(scope, session, sessionContainerFor(session, scope), cfg, p.message.content ?? []);
+        }
+        catch (error) { ctx.logger.warn('supermemory inbox bind:', error); }
+    }));
+
     // Release per-session state when a session leaves the store.
     disposers.push(ctx.on('session/disposed', (session) => {
         sessionContainerRef.delete(session.id);
-        sessionProfileCache.delete(session.id);
         sessionWorkspaceRef.delete(session.id);
         workspaceResolving.delete(session.id);
         sessionDocRef.delete(session.id);
         clearRecallState(session.id);
     }));
 
-    // ── Session init: warm WSL probe, snapshot container, fetch profile into
-    //    the cache the context text provider reads synchronously on each step.
+    // ── Session init: warm WSL probe + snapshot container. The static profile
+    //    is pre-warmed at plugin activation (prewarmProfile); this fallback
+    //    only tops up a container whose profile is still uncached (e.g. the
+    //    user switched the global container after boot).
     disposers.push(ctx.on('session/created', (session) => {
         if (isSubagent(session)) return;
         // Warm the WSL environment probe NOW (synchronously, before the first
@@ -286,17 +344,12 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
                 if (!sessionContainerRef.has(session.id)) {
                     sessionContainerRef.set(session.id, active);
                 }
-                let profileText = '';
-                for (let attempt = 0; attempt < 3; attempt += 1) {
+                if (!profileByContainer.has(active)) {
                     try {
-                        profileText = await fetchProfile(scope, active);
-                        if (profileText) break;
+                        const text = await fetchProfile(scope, active);
+                        if (text) profileByContainer.set(active, text);
                     }
-                    catch { /* upstream may still be booting */ }
-                    await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
-                }
-                if (profileText) {
-                    sessionProfileCache.set(session.id, profileText);
+                    catch { /* upstream may still be booting — leave for a later session */ }
                 }
                 // Pre-init the session document state so the first turn's PATCH
                 // logic has a stable entry (not strictly required, but keeps a
@@ -308,12 +361,10 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
         })();
     }));
 
-    // ── Turn persistence + per-message dynamic recall logging ─────────────
+    // ── Turn persistence ──────────────────────────────────────────────────
     //
-    // Dynamic recall is NOT appended here anymore — it is a context
-    // contribution evaluated by the native step-level assembly, so it lands
-    // before the first deriveMessages() of the turn. This handler only logs
-    // the hit count for diagnostics and (on turn/end) persists the transcript.
+    // Recall is injected via the inbox + context providers above, not here.
+    // This handler only persists the finished turn's transcript.
     disposers.push(ctx.on('session/event', (session, event) => {
         if (isSubagent(session)) return;
         if (event.type === 'user/message') {

@@ -27,7 +27,7 @@ import { registerSupermemorySettings } from './config.ts';
 import { ManagedServer } from './managed-server.ts';
 import { handleApi, API_PREFIX } from './http.ts';
 import { registerMemoryTools } from './tools/index.ts';
-import { registerSessionHooks } from './hooks.ts';
+import { registerSessionHooks, prewarmProfile } from './hooks.ts';
 import { prewarmWslProbes, setProbeLog } from './environment.ts';
 
 /** Required services: the web route registry, the user-settings seam, the tool registry, the workspace resolver, the prompt-context system and the shell executor. */
@@ -50,6 +50,9 @@ function apply(ctx: Context): void {
         // has settled per-distro data ready for the first model step of a WSL
         // workspace (fire-and-forget; no-ops when WSL is unavailable).
         void prewarmWslProbes();
+        // Pre-warm the active container's static profile so a brand-new session
+        // already has a stable profile on its first step (no cold-start race).
+        void prewarmProfile(scope);
         const disposers = [
             ctx.webServer.register({
                 kind: 'prefix',

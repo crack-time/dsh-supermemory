@@ -31,19 +31,39 @@ import type { SettingsScope } from '@deepseek-ai/dsh-settings';
 export declare function staticContextText(ctx: Context, session: Session, container: string, profile: string): string;
 /** Release per-session recall state (call from session/disposed). */
 export declare function clearRecallState(sessionId: string): void;
-interface RecallConfig {
+/** Per-message recall tuning, shared by the inbox handlers and renderer. */
+export interface RecallConfig {
     recallTopK: number;
     recallMaxChars: number;
     recallThreshold: number;
     recallEnabled: boolean;
 }
+/** Resolve the live per-message recall config from the settings scope. */
+export declare function recallConfigOf(scope: SettingsScope<any>): RecallConfig;
 /**
- * Render the dynamic recall text for the current message, or '' when there is
- * nothing to inject. Looks up the latest real user message (source.kind===
- * "user") in the session's surface, dedups by signature, searches, and returns
- * the bounded hit list. Called synchronously by the context text provider.
+ * Pre-compute the recall for one human user message and cache it by signature.
+ * Called synchronously from `agent/inbox/inserted` (the message is already in
+ * the inbox, before it is claimed): blocking here deliberately pins the send
+ * path until the search lands, so the agent wakes with the cache already warm
+ * ("make the agent busy until the search is done"). No-op when the signature
+ * is already cached (a message is only ever searched once per session).
  */
-export declare function dynamicRecallText(scope: SettingsScope<any>, session: Session, container: string, cfg: RecallConfig): string;
+export declare function prewarmRecall(scope: SettingsScope<any>, session: Session, container: string, cfg: RecallConfig, content: readonly unknown[]): void;
+/**
+ * Bind the message currently being claimed so the text() provider renders ITS
+ * recall. Called synchronously from `agent/inbox/claimed` (right before the
+ * step's assembly). Cache is usually already warm from prewarmRecall at
+ * `inserted`; this does a synchronous fallback search only on a cold miss.
+ */
+export declare function bindRecall(scope: SettingsScope<any>, session: Session, container: string, cfg: RecallConfig, content: readonly unknown[]): void;
+/**
+ * Render the dynamic recall block for the message currently bound to this
+ * session (set at `agent/inbox/claimed`). Reads the synchronous cache that the
+ * inserted/claimed handlers already populated — no network here, so this is a
+ * pure cache read (zero main-thread blocking). Returns '' only when no human
+ * message has been bound yet (e.g. no inbox claim for this session).
+ */
+export declare function dynamicRecallText(session: Session, cfg: RecallConfig): string;
 /**
  * Register the plugin's two context contributions through systemPrompt.context().
  * `resolve` supplies the per-session container + static profile (caller owns
@@ -66,4 +86,3 @@ export declare function registerMemoryContexts(scopedCtx: {
     container: string;
     profile: string;
 }): Array<() => void>;
-export {};

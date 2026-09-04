@@ -77,6 +77,12 @@ interface RecallState {
 
 const recallCache = new Map<string, RecallState>();
 
+/** Agent binding: the recalled norm for the message currently being claimed /
+ *  assembled, keyed by session id (set at `agent/inbox/claimed`). Kept — not
+ *  cleared after one read — so tool-call steps in the same turn keep rendering
+ *  the same recall block (native project() dedup suppresses repeats). */
+const recallBinding = new Map<string, { norm: string }>();
+
 function recallState(sessionId: string): RecallState {
     let state = recallCache.get(sessionId);
     if (!state) {
@@ -89,13 +95,26 @@ function recallState(sessionId: string): RecallState {
 /** Release per-session recall state (call from session/disposed). */
 export function clearRecallState(sessionId: string): void {
     recallCache.delete(sessionId);
+    recallBinding.delete(sessionId);
 }
 
-interface RecallConfig {
+/** Per-message recall tuning, shared by the inbox handlers and renderer. */
+export interface RecallConfig {
     recallTopK: number;
     recallMaxChars: number;
     recallThreshold: number;
     recallEnabled: boolean;
+}
+
+/** Resolve the live per-message recall config from the settings scope. */
+export function recallConfigOf(scope: SettingsScope<any>): RecallConfig {
+    const cfg = resolveConfig(scope);
+    return {
+        recallTopK: cfg.recallTopK,
+        recallMaxChars: cfg.recallMaxChars,
+        recallThreshold: cfg.recallThreshold,
+        recallEnabled: cfg.recallEnabled,
+    };
 }
 
 function recallSearchSync(
@@ -164,46 +183,66 @@ function recallSearchExec(
 }
 
 /**
- * Render the dynamic recall text for the current message, or '' when there is
- * nothing to inject. Looks up the latest real user message (source.kind===
- * "user") in the session's surface, dedups by signature, searches, and returns
- * the bounded hit list. Called synchronously by the context text provider.
+ * Pre-compute the recall for one human user message and cache it by signature.
+ * Called synchronously from `agent/inbox/inserted` (the message is already in
+ * the inbox, before it is claimed): blocking here deliberately pins the send
+ * path until the search lands, so the agent wakes with the cache already warm
+ * ("make the agent busy until the search is done"). No-op when the signature
+ * is already cached (a message is only ever searched once per session).
  */
-export function dynamicRecallText(
+export function prewarmRecall(
     scope: SettingsScope<any>,
     session: Session,
     container: string,
     cfg: RecallConfig,
-): string {
-    if (!cfg.recallEnabled) return '';
-    const lastUser = lastUserText(session);
-    if (!lastUser) return '';
-    const norm = recallSignature(lastUser);
-    if (!norm) return '';
-    // We have a real user message to search, so this message ALWAYS gets a
-    // recall block: either the top hits, or a short "no relevant memories"
-    // placeholder when the search comes back empty (renderRecall's default
-    // emptyText). Caching applies to empty results too, so a low-recall message
-    // isn't re-searched on every tool-call step.
+    content: readonly unknown[],
+): void {
+    if (!cfg.recallEnabled) return;
+    const norm = recallSignature(messageText(content));
+    if (!norm) return;
     const state = recallState(session.id);
-    let hits: Array<{ memory: string }> | undefined = state.bySignature.get(norm);
-    if (hits === undefined) {
-        state.searched.add(norm);
-        hits = recallSearchSync(scope, container, norm, cfg.recallTopK, cfg.recallThreshold);
-        state.bySignature.set(norm, hits);
-    }
-    return renderRecall(hits, cfg.recallTopK, cfg.recallMaxChars);
+    if (state.bySignature.has(norm)) return;
+    state.searched.add(norm);
+    state.bySignature.set(norm, recallSearchSync(scope, container, norm, cfg.recallTopK, cfg.recallThreshold));
 }
 
-/** The most recent real user-message text in the session surface, or ''. */
-function lastUserText(session: Session): string {
-    try {
-        return messageText(session.deriveMessages()
-            .filter((m) => m.role === 'user' && m.source?.kind === 'user')
-            .at(-1)?.content ?? []);
-    } catch {
-        return '';
+/**
+ * Bind the message currently being claimed so the text() provider renders ITS
+ * recall. Called synchronously from `agent/inbox/claimed` (right before the
+ * step's assembly). Cache is usually already warm from prewarmRecall at
+ * `inserted`; this does a synchronous fallback search only on a cold miss.
+ */
+export function bindRecall(
+    scope: SettingsScope<any>,
+    session: Session,
+    container: string,
+    cfg: RecallConfig,
+    content: readonly unknown[],
+): void {
+    if (!cfg.recallEnabled) return;
+    const norm = recallSignature(messageText(content));
+    if (!norm) return;
+    const state = recallState(session.id);
+    if (!state.bySignature.has(norm)) {
+        state.searched.add(norm);
+        state.bySignature.set(norm, recallSearchSync(scope, container, norm, cfg.recallTopK, cfg.recallThreshold));
     }
+    recallBinding.set(session.id, { norm });
+}
+
+/**
+ * Render the dynamic recall block for the message currently bound to this
+ * session (set at `agent/inbox/claimed`). Reads the synchronous cache that the
+ * inserted/claimed handlers already populated — no network here, so this is a
+ * pure cache read (zero main-thread blocking). Returns '' only when no human
+ * message has been bound yet (e.g. no inbox claim for this session).
+ */
+export function dynamicRecallText(session: Session, cfg: RecallConfig): string {
+    if (!cfg.recallEnabled) return '';
+    const bound = recallBinding.get(session.id);
+    if (!bound) return '';
+    const hits = recallState(session.id).bySignature.get(bound.norm) ?? [];
+    return renderRecall(hits, cfg.recallTopK, cfg.recallMaxChars);
 }
 
 /**
@@ -218,13 +257,7 @@ export function registerMemoryContexts(
     scope: SettingsScope<any>,
     resolve: (session?: Session) => { container: string; profile: string },
 ): Array<() => void> {
-    const cfg = resolveConfig(scope);
-    const c: RecallConfig = {
-        recallEnabled: cfg.recallEnabled,
-        recallTopK: cfg.recallTopK,
-        recallMaxChars: cfg.recallMaxChars,
-        recallThreshold: cfg.recallThreshold,
-    };
+    const c = recallConfigOf(scope);
     const disposers: Array<() => void> = [];
 
     // Static context (environment block + static profile) — head of the prompt.
@@ -241,15 +274,16 @@ export function registerMemoryContexts(
 
     // Dynamic recall — right after the static context (order 6), so the
     // retrieved memories read immediately after the profile, before any of the
-    // native sandbox/approval sections. Evaluated on every assembly.
+    // native sandbox/approval sections. Evaluated on every assembly; the text
+    // provider only reads the cache the inbox handlers populate, so it is a
+    // pure synchronous lookup (zero main-thread blocking).
     disposers.push(scopedCtx.systemPrompt.context({
         name: 'supermemory:recall',
         order: 6,
         text: (ctx) => {
             const session = ctx.agent?.session;
             if (!session || isSubagent(session)) return '';
-            const { container } = resolve(session);
-            return dynamicRecallText(scope, session, container, c);
+            return dynamicRecallText(session, c);
         },
     }));
 

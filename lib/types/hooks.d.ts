@@ -1,11 +1,15 @@
 /**
  * Deterministic session hooks:
- *  - session/created -> snapshot the container + fetch profile into a cache
- *    the context text provider reads synchronously on the first model step.
- *  - systemPrompt.context() registrations (context-inject.ts) -> the static
- *    environment+profile block and the per-message dynamic recall both flow
- *    through the native assemble -> project() step-level path, so they land
- *    before the turn's first deriveMessages() and use native dedup timing.
+ *  - activation -> pre-warm the active container's static profile into a global
+ *    cache (see prewarmProfile); a session/created fallback tops up a container
+ *    that changed after boot. The context text provider reads this cache
+ *    synchronously on the first model step.
+ *  - agent/inbox/inserted|claimed -> drive per-message dynamic recall: prewarm
+ *    the search at insert (pinning the send path until it lands) and bind the
+ *    claimed message so the context text provider renders its recall from cache.
+ *  - systemPrompt.context() registrations (context-inject.ts) -> static
+ *    environment+profile and per-message recall flow through the native
+ *    assemble → project() step-level path.
  *  - turn/end -> accumulate the turn transcript and PATCH it into the
  *    session's single supermemory document (each session owns one doc).
  *    Subagent sessions are skipped for all of the above.
@@ -24,5 +28,7 @@ export interface SessionDocState {
     /** True while a PATCH is in flight — skip new turns until it settles. */
     patching: boolean;
 }
+/** Pre-warm the active container's static profile once (fire-and-forget). */
+export declare function prewarmProfile(scope: SettingsScope<any>): Promise<void>;
 /** Register the session hooks (context registration + turn persistence). */
 export declare function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): Array<() => void>;
