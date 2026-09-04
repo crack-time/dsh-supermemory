@@ -19,6 +19,13 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
+/**
+ * Discard an archived session when its recomputed transcript is shorter than
+ * this (characters). Short sessions (greetings, one-liners, brief Q&A) carry
+ * no durable signal worth ingesting and would only re-trigger the upstream
+ * LLM filter for near-zero value.
+ */
+export declare const MIN_ARCHIVE_SESSION_CHARS = 20000;
 /** Look up the container a session was bound to at creation time. */
 export declare function getSessionContainer(sessionId: string): string | undefined;
 /** Override the session container snapshot (used by the input-bar selector). */
