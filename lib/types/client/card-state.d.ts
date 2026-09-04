@@ -6,8 +6,6 @@ export interface CardState {
     openaiApiKey: string;
     openaiBaseUrl: string;
     openaiModel: string;
-    reviewProxyPath: string;
-    reviewProxyPort: number;
     activeContainer: string;
     recallEnabled: boolean;
     recallTopK: number;
@@ -46,8 +44,6 @@ export declare function useSupermemoryCard(deps: CardHookDeps): {
     openaiApiKey: string;
     openaiBaseUrl: string;
     openaiModel: string;
-    reviewProxyPath: string;
-    reviewProxyPort: number;
     recallEnabled: boolean;
     recallTopK: number;
     recallThreshold: number;
@@ -68,8 +64,6 @@ export declare function useSupermemoryCard(deps: CardHookDeps): {
     setOpenaiApiKey: import("react").Dispatch<import("react").SetStateAction<string>>;
     setOpenaiBaseUrl: import("react").Dispatch<import("react").SetStateAction<string>>;
     setOpenaiModel: import("react").Dispatch<import("react").SetStateAction<string>>;
-    setReviewProxyPath: import("react").Dispatch<import("react").SetStateAction<string>>;
-    setReviewProxyPort: import("react").Dispatch<import("react").SetStateAction<number>>;
     setRecallEnabled: import("react").Dispatch<import("react").SetStateAction<boolean>>;
     setRecallTopK: import("react").Dispatch<import("react").SetStateAction<number>>;
     setRecallThreshold: import("react").Dispatch<import("react").SetStateAction<number>>;

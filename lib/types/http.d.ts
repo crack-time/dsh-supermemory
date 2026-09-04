@@ -7,7 +7,6 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Context } from '@deepseek-ai/cordis';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
 import type { ManagedServer } from './managed-server.ts';
-import type { ReviewProxy } from './review-proxy.ts';
 export declare const API_PREFIX = "/plugins/@crack/dsh-supermemory/api";
 /** Dispatch every /api route (mounted as a prefix on the dsh web server). */
-export declare function handleApi(ctx: Context, scope: SettingsScope<any>, req: IncomingMessage, res: ServerResponse, managed: ManagedServer, reviewProxy?: ReviewProxy): Promise<void>;
+export declare function handleApi(ctx: Context, scope: SettingsScope<any>, req: IncomingMessage, res: ServerResponse, managed: ManagedServer): Promise<void>;

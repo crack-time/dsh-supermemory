@@ -19,7 +19,6 @@ import { probeHealth } from './upstream.ts';
 import { readBody, readJsonBody, sendJson } from './http-util.ts';
 import { maskApiKey } from './redact.ts';
 import type { ManagedServer } from './managed-server.ts';
-import type { ReviewProxy } from './review-proxy.ts';
 
 export const API_PREFIX = '/plugins/@crack/dsh-supermemory/api';
 
@@ -121,7 +120,6 @@ export async function handleApi(
     req: IncomingMessage,
     res: ServerResponse,
     managed: ManagedServer,
-    reviewProxy?: ReviewProxy,
 ): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://dsh.local');
     const pathname = url.pathname;
@@ -154,7 +152,6 @@ export async function handleApi(
             }
             await scope.update(patch);
             await managed.sync(scope, ctx); // reconcile the managed process after save
-            if (reviewProxy) await reviewProxy.sync(scope, ctx); // reconcile the review-proxy too
             // Never echo the plaintext key back — clients get the masked view.
             return sendJson(res, 200, clientConfig(scope));
         }

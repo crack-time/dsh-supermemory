@@ -33,9 +33,6 @@ export declare const CARD_LOCALE: {
         emptyKey: string;
         serverPath: string;
         serverPathHint: string;
-        reviewProxyPath: string;
-        reviewProxyHint: string;
-        reviewProxyPort: string;
         openaiApiKey: string;
         openaiBaseUrl: string;
         openaiModel: string;
@@ -87,9 +84,6 @@ export declare const CARD_LOCALE: {
         emptyKey: string;
         serverPath: string;
         serverPathHint: string;
-        reviewProxyPath: string;
-        reviewProxyHint: string;
-        reviewProxyPort: string;
         openaiApiKey: string;
         openaiBaseUrl: string;
         openaiModel: string;
