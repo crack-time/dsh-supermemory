@@ -29,6 +29,7 @@ import type {} from '@deepseek-ai/dsh-session';
 import type {} from '@deepseek-ai/dsh-session-persistence';
 import { registerSupermemorySettings } from './config.ts';
 import { ManagedServer } from './managed-server.ts';
+import { ReviewProxy } from './review-proxy.ts';
 import { handleApi, API_PREFIX } from './http.ts';
 import { registerMemoryTools } from './tools/index.ts';
 import { registerSessionHooks, prewarmProfile } from './hooks.ts';
@@ -44,10 +45,14 @@ function apply(ctx: Context): void {
     const scope = registerSupermemorySettings(ctx);
     // Managed local server: spawn alongside dsh web, kill on dispose.
     const managed = new ManagedServer();
+    // Managed review-proxy (Review tab into the dashboard UI): same lifecycle.
+    const reviewProxy = new ReviewProxy();
     ctx.effect(() => {
         // Start (or adopt) the managed server when this plugin activates —
         // i.e. when dsh web boots and loads the plugin.
         void managed.sync(scope, ctx);
+        // Start the review-proxy alongside it (no-op when reviewProxyPath empty).
+        void reviewProxy.sync(scope, ctx);
         // Route WSL probe diagnostics to the host logger.
         setProbeLog((msg) => ctx.logger.debug(msg));
         // Pre-warm the WSL environment probes so the injected environment block
@@ -61,14 +66,15 @@ function apply(ctx: Context): void {
             ctx.webServer.register({
                 kind: 'prefix',
                 path: API_PREFIX,
-                handler: (req, res) => handleApi(ctx, scope, req, res, managed),
+                handler: (req, res) => handleApi(ctx, scope, req, res, managed, reviewProxy),
             }),
             ...registerMemoryTools(ctx, scope),
             ...registerSessionHooks(ctx, scope),
         ];
         return () => {
-            // dsh web is stopping: tear down the managed server process tree.
+            // dsh web is stopping: tear down the managed process trees.
             void managed.stop(ctx);
+            void reviewProxy.stop(ctx);
             disposers.forEach((dispose) => dispose());
         };
     }, 'dsh-supermemory: proxy + health + config + memory tools');

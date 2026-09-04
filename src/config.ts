@@ -28,6 +28,11 @@ export interface SupermemoryConfig {
     openaiApiKey: string;
     openaiBaseUrl: string;
     openaiModel: string;
+    /** Managed review-proxy (a "Review" tab injected into the dashboard UI):
+     *  path to proxy.mjs and the port it listens on. Mirrors serverPath for the
+     *  supermemory server — empty path disables the managed process. */
+    reviewProxyPath: string;
+    reviewProxyPort: number;
     /** Currently selected memory container tag (persisted across sessions). */
     activeContainer: string;
     /** Per-message dynamic recall: search on every user message and inject the
@@ -50,6 +55,9 @@ export const SUPERMEMORY_SCHEMA = z.object({
     openaiBaseUrl: z.string().default(DEFAULT_OPENAI_BASE_URL),
     openaiModel: z.string().default(DEFAULT_OPENAI_MODEL),
     activeContainer: z.string().default(''),
+    // Managed review-proxy: path to proxy.mjs + its port.
+    reviewProxyPath: z.string().default(''),
+    reviewProxyPort: z.number().default(6768),
     // Per-message dynamic recall tuning.
     recallEnabled: z.boolean().default(true),
     recallTopK: z.number().default(4),
@@ -66,6 +74,8 @@ function mergeConfig(value: unknown): SupermemoryConfig {
         openaiApiKey: (v.openaiApiKey as string) ?? '',
         openaiBaseUrl: (v.openaiBaseUrl as string) ?? DEFAULT_OPENAI_BASE_URL,
         openaiModel: (v.openaiModel as string) ?? DEFAULT_OPENAI_MODEL,
+        reviewProxyPath: (v.reviewProxyPath as string) ?? '',
+        reviewProxyPort: typeof v.reviewProxyPort === 'number' && Number.isFinite(v.reviewProxyPort) ? Math.floor(v.reviewProxyPort) : 6768,
         activeContainer: (v.activeContainer as string) ?? '',
         recallEnabled: v.recallEnabled === undefined ? true : v.recallEnabled === true,
         recallTopK: typeof v.recallTopK === 'number' && Number.isFinite(v.recallTopK) ? Math.max(1, Math.min(10, Math.floor(v.recallTopK))) : 4,

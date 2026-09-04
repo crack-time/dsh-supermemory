@@ -18,6 +18,8 @@ export interface CardState {
     openaiApiKey: string;
     openaiBaseUrl: string;
     openaiModel: string;
+    reviewProxyPath: string;
+    reviewProxyPort: number;
     activeContainer: string;
     recallEnabled: boolean;
     recallTopK: number;
@@ -54,6 +56,8 @@ const DEFAULT_EMPTY: CardState = {
     openaiApiKey: '',
     openaiBaseUrl: '',
     openaiModel: '',
+    reviewProxyPath: '',
+    reviewProxyPort: 6768,
     activeContainer: '',
     recallEnabled: true,
     recallTopK: 4,
@@ -72,6 +76,8 @@ export function useSupermemoryCard(deps: CardHookDeps) {
     const [openaiApiKey, setOpenaiApiKey] = useState('');
     const [openaiBaseUrl, setOpenaiBaseUrl] = useState('');
     const [openaiModel, setOpenaiModel] = useState('');
+    const [reviewProxyPath, setReviewProxyPath] = useState('');
+    const [reviewProxyPort, setReviewProxyPort] = useState(6768);
     const [recallEnabled, setRecallEnabled] = useState(true);
     const [recallTopK, setRecallTopK] = useState(4);
     const [recallThreshold, setRecallThreshold] = useState(0.55);
@@ -91,6 +97,8 @@ export function useSupermemoryCard(deps: CardHookDeps) {
             openaiApiKey.trim() !== server.openaiApiKey ||
             openaiBaseUrl.trim() !== server.openaiBaseUrl ||
             openaiModel.trim() !== server.openaiModel ||
+            reviewProxyPath.trim() !== (server.reviewProxyPath ?? '') ||
+            reviewProxyPort !== (server.reviewProxyPort ?? 6768) ||
             recallEnabled !== !!server.recallEnabled ||
             recallTopK !== (server.recallTopK ?? 4) ||
             recallThreshold !== (server.recallThreshold ?? 0.55));
@@ -108,6 +116,8 @@ export function useSupermemoryCard(deps: CardHookDeps) {
             setOpenaiApiKey(cfg.openaiApiKey ?? '');
             setOpenaiBaseUrl(cfg.openaiBaseUrl ?? '');
             setOpenaiModel(cfg.openaiModel ?? '');
+            setReviewProxyPath(cfg.reviewProxyPath ?? '');
+            setReviewProxyPort(typeof cfg.reviewProxyPort === 'number' ? cfg.reviewProxyPort : 6768);
             setRecallEnabled(cfg.recallEnabled !== false);
             setRecallTopK(typeof cfg.recallTopK === 'number' ? cfg.recallTopK : 4);
             setRecallThreshold(typeof cfg.recallThreshold === 'number' ? cfg.recallThreshold : 0.55);
@@ -118,6 +128,8 @@ export function useSupermemoryCard(deps: CardHookDeps) {
                 openaiApiKey: cfg.openaiApiKey ?? '',
                 openaiBaseUrl: cfg.openaiBaseUrl ?? '',
                 openaiModel: cfg.openaiModel ?? '',
+                reviewProxyPath: cfg.reviewProxyPath ?? '',
+                reviewProxyPort: typeof cfg.reviewProxyPort === 'number' ? cfg.reviewProxyPort : 6768,
                 activeContainer: cfg.activeContainer ?? '',
                 recallEnabled: cfg.recallEnabled !== false,
                 recallTopK: typeof cfg.recallTopK === 'number' ? cfg.recallTopK : 4,
@@ -150,6 +162,8 @@ export function useSupermemoryCard(deps: CardHookDeps) {
         if (openaiApiKey.trim() !== (server?.openaiApiKey ?? '')) patch.openaiApiKey = openaiApiKey.trim();
         if (openaiBaseUrl.trim() !== (server?.openaiBaseUrl ?? '')) patch.openaiBaseUrl = openaiBaseUrl.trim();
         if (openaiModel.trim() !== (server?.openaiModel ?? '')) patch.openaiModel = openaiModel.trim();
+        if (reviewProxyPath.trim() !== (server?.reviewProxyPath ?? '')) patch.reviewProxyPath = reviewProxyPath.trim();
+        if (reviewProxyPort !== (server?.reviewProxyPort ?? 6768)) patch.reviewProxyPort = reviewProxyPort;
         if (recallEnabled !== !!server?.recallEnabled) patch.recallEnabled = recallEnabled;
         if (recallTopK !== (server?.recallTopK ?? 4)) patch.recallTopK = recallTopK;
         if (recallThreshold !== (server?.recallThreshold ?? 0.55)) patch.recallThreshold = recallThreshold;
@@ -242,11 +256,13 @@ export function useSupermemoryCard(deps: CardHookDeps) {
 
     return {
         open, loading, baseUrl, apiKey, serverPath, openaiApiKey, openaiBaseUrl,
-        openaiModel, recallEnabled, recallTopK, recallThreshold, managed, server,
+        openaiModel, reviewProxyPath, reviewProxyPort,
+        recallEnabled, recallTopK, recallThreshold, managed, server,
         saving, saveFailed, justSaved, testing, status, loadErr,
         dirty, mgtText,
         setOpen, setBaseUrl, setApiKey, setServerPath, setOpenaiApiKey,
-        setOpenaiBaseUrl, setOpenaiModel, setRecallEnabled, setRecallTopK,
+        setOpenaiBaseUrl, setOpenaiModel, setReviewProxyPath, setReviewProxyPort,
+        setRecallEnabled, setRecallTopK,
         setRecallThreshold,
         setManaged, setSaving, setSaveFailed, setJustSaved, setTesting,
         setStatus, setLoadErr,

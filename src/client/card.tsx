@@ -51,11 +51,13 @@ export function SupermemorySettingsCard(props: CardProps) {
 
     const {
         open, baseUrl, apiKey, serverPath, openaiApiKey, openaiBaseUrl,
-        openaiModel, recallEnabled, recallTopK, recallThreshold, managed, server,
+        openaiModel, reviewProxyPath, reviewProxyPort,
+        recallEnabled, recallTopK, recallThreshold, managed, server,
         saving, saveFailed, justSaved, testing, status, loadErr,
         dirty, mgtText,
         setOpen, setBaseUrl, setApiKey, setServerPath, setOpenaiApiKey,
-        setOpenaiBaseUrl, setOpenaiModel, setRecallEnabled, setRecallTopK,
+        setOpenaiBaseUrl, setOpenaiModel, setReviewProxyPath, setReviewProxyPort,
+        setRecallEnabled, setRecallTopK,
         setRecallThreshold,
         setSaveFailed, commit, runTest,
     } = useSupermemoryCard({ t: txt, applyPatch });
@@ -117,6 +119,26 @@ export function SupermemorySettingsCard(props: CardProps) {
                             onChange={(e) => setServerPath(e.target.value)}
                         />
                         <span className="sm-settings-hint">{txt('serverPathHint')}</span>
+                    </label>
+                    <label className="sm-settings-row">
+                        <span className="sm-settings-label">{txt('reviewProxyPath')}</span>
+                        <input
+                            type="text"
+                            value={reviewProxyPath}
+                            placeholder="E:\Desktop\work\supermemory-review-proxy\proxy.mjs"
+                            spellCheck={false}
+                            onChange={(e) => setReviewProxyPath(e.target.value)}
+                        />
+                        <span className="sm-settings-hint">{txt('reviewProxyHint')}</span>
+                    </label>
+                    <label className="sm-settings-row">
+                        <span className="sm-settings-label">{txt('reviewProxyPort')}</span>
+                        <input
+                            type="number"
+                            value={reviewProxyPort}
+                            spellCheck={false}
+                            onChange={(e) => setReviewProxyPort(Number(e.target.value))}
+                        />
                     </label>
                     <label className="sm-settings-row">
                         <span className="sm-settings-label">{txt('openaiApiKey')}</span>

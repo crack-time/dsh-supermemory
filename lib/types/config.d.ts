@@ -22,6 +22,11 @@ export interface SupermemoryConfig {
     openaiApiKey: string;
     openaiBaseUrl: string;
     openaiModel: string;
+    /** Managed review-proxy (a "Review" tab injected into the dashboard UI):
+     *  path to proxy.mjs and the port it listens on. Mirrors serverPath for the
+     *  supermemory server — empty path disables the managed process. */
+    reviewProxyPath: string;
+    reviewProxyPort: number;
     /** Currently selected memory container tag (persisted across sessions). */
     activeContainer: string;
     /** Per-message dynamic recall: search on every user message and inject the
@@ -42,6 +47,8 @@ export declare const SUPERMEMORY_SCHEMA: z<Schemastery.ObjectS<{
     openaiBaseUrl: z<string, string>;
     openaiModel: z<string, string>;
     activeContainer: z<string, string>;
+    reviewProxyPath: z<string, string>;
+    reviewProxyPort: z<number, number>;
     recallEnabled: z<boolean, boolean>;
     recallTopK: z<number, number>;
     recallMaxChars: z<number, number>;
@@ -54,6 +61,8 @@ export declare const SUPERMEMORY_SCHEMA: z<Schemastery.ObjectS<{
     openaiBaseUrl: z<string, string>;
     openaiModel: z<string, string>;
     activeContainer: z<string, string>;
+    reviewProxyPath: z<string, string>;
+    reviewProxyPort: z<number, number>;
     recallEnabled: z<boolean, boolean>;
     recallTopK: z<number, number>;
     recallMaxChars: z<number, number>;
