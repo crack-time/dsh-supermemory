@@ -38,6 +38,10 @@ export interface RecallConfig {
     recallThreshold: number;
     recallEnabled: boolean;
 }
+/** A synchronous recall search implementation (real: worker/exec; tests: fake). */
+export type RecallSearcher = (scope: SettingsScope<any>, container: string, query: string, limit: number, threshold: number) => Array<{
+    memory: string;
+}>;
 /** Resolve the live per-message recall config from the settings scope. */
 export declare function recallConfigOf(scope: SettingsScope<any>): RecallConfig;
 /**
@@ -47,15 +51,18 @@ export declare function recallConfigOf(scope: SettingsScope<any>): RecallConfig;
  * path until the search lands, so the agent wakes with the cache already warm
  * ("make the agent busy until the search is done"). No-op when the signature
  * is already cached (a message is only ever searched once per session).
+ * @param search - injectable searcher; defaults to the real worker-based one
+ *                 and is overridden in tests to avoid a live upstream.
  */
-export declare function prewarmRecall(scope: SettingsScope<any>, session: Session, container: string, cfg: RecallConfig, content: readonly unknown[]): void;
+export declare function prewarmRecall(scope: SettingsScope<any>, session: Session, container: string, cfg: RecallConfig, content: readonly unknown[], search?: RecallSearcher): void;
 /**
  * Bind the message currently being claimed so the text() provider renders ITS
  * recall. Called synchronously from `agent/inbox/claimed` (right before the
  * step's assembly). Cache is usually already warm from prewarmRecall at
  * `inserted`; this does a synchronous fallback search only on a cold miss.
+ * @param search - injectable searcher; overridden in tests (see prewarmRecall).
  */
-export declare function bindRecall(scope: SettingsScope<any>, session: Session, container: string, cfg: RecallConfig, content: readonly unknown[]): void;
+export declare function bindRecall(scope: SettingsScope<any>, session: Session, container: string, cfg: RecallConfig, content: readonly unknown[], search?: RecallSearcher): void;
 /**
  * Render the dynamic recall block for the message currently bound to this
  * session (set at `agent/inbox/claimed`). Reads the synchronous cache that the

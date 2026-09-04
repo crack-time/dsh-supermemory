@@ -1,0 +1,13 @@
+# Normalize line endings: keep working-tree files as LF regardless of host OS.
+* text=auto eol=lf
+
+# Binary formats must never be touched by the normalization above.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.zip binary
+*.tar.gz binary
+*.woff binary
+*.woff2 binary

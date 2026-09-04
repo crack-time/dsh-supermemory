@@ -28,7 +28,7 @@ export interface SessionDocState {
     /** True while a PATCH is in flight — skip new turns until it settles. */
     patching: boolean;
 }
-/** Pre-warm the active container's static profile once (fire-and-forget). */
+/** Pre-warm the active container's static profile if missing or stale. */
 export declare function prewarmProfile(scope: SettingsScope<any>): Promise<void>;
 /** Register the session hooks (context registration + turn persistence). */
 export declare function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): Array<() => void>;

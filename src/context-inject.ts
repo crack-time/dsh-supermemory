@@ -29,6 +29,7 @@ import { messageText } from './transcript.ts';
 import { environmentBlock } from './environment.ts';
 import { SearchWorker } from './search-worker.ts';
 import { recallSignature, renderRecall, filterSearchHits } from './recall.ts';
+import { isSubagent } from './session-util.ts';
 
 /** One persistent search worker shared by every session (spawned on first use). */
 const searchWorker = new SearchWorker();
@@ -105,6 +106,15 @@ export interface RecallConfig {
     recallThreshold: number;
     recallEnabled: boolean;
 }
+
+/** A synchronous recall search implementation (real: worker/exec; tests: fake). */
+export type RecallSearcher = (
+    scope: SettingsScope<any>,
+    container: string,
+    query: string,
+    limit: number,
+    threshold: number,
+) => Array<{ memory: string }>;
 
 /** Resolve the live per-message recall config from the settings scope. */
 export function recallConfigOf(scope: SettingsScope<any>): RecallConfig {
@@ -189,6 +199,8 @@ function recallSearchExec(
  * path until the search lands, so the agent wakes with the cache already warm
  * ("make the agent busy until the search is done"). No-op when the signature
  * is already cached (a message is only ever searched once per session).
+ * @param search - injectable searcher; defaults to the real worker-based one
+ *                 and is overridden in tests to avoid a live upstream.
  */
 export function prewarmRecall(
     scope: SettingsScope<any>,
@@ -196,6 +208,7 @@ export function prewarmRecall(
     container: string,
     cfg: RecallConfig,
     content: readonly unknown[],
+    search: RecallSearcher = recallSearchSync,
 ): void {
     if (!cfg.recallEnabled) return;
     const norm = recallSignature(messageText(content));
@@ -203,7 +216,7 @@ export function prewarmRecall(
     const state = recallState(session.id);
     if (state.bySignature.has(norm)) return;
     state.searched.add(norm);
-    state.bySignature.set(norm, recallSearchSync(scope, container, norm, cfg.recallTopK, cfg.recallThreshold));
+    state.bySignature.set(norm, search(scope, container, norm, cfg.recallTopK, cfg.recallThreshold));
 }
 
 /**
@@ -211,6 +224,7 @@ export function prewarmRecall(
  * recall. Called synchronously from `agent/inbox/claimed` (right before the
  * step's assembly). Cache is usually already warm from prewarmRecall at
  * `inserted`; this does a synchronous fallback search only on a cold miss.
+ * @param search - injectable searcher; overridden in tests (see prewarmRecall).
  */
 export function bindRecall(
     scope: SettingsScope<any>,
@@ -218,6 +232,7 @@ export function bindRecall(
     container: string,
     cfg: RecallConfig,
     content: readonly unknown[],
+    search: RecallSearcher = recallSearchSync,
 ): void {
     if (!cfg.recallEnabled) return;
     const norm = recallSignature(messageText(content));
@@ -225,7 +240,7 @@ export function bindRecall(
     const state = recallState(session.id);
     if (!state.bySignature.has(norm)) {
         state.searched.add(norm);
-        state.bySignature.set(norm, recallSearchSync(scope, container, norm, cfg.recallTopK, cfg.recallThreshold));
+        state.bySignature.set(norm, search(scope, container, norm, cfg.recallTopK, cfg.recallThreshold));
     }
     recallBinding.set(session.id, { norm });
 }
@@ -257,7 +272,6 @@ export function registerMemoryContexts(
     scope: SettingsScope<any>,
     resolve: (session?: Session) => { container: string; profile: string },
 ): Array<() => void> {
-    const c = recallConfigOf(scope);
     const disposers: Array<() => void> = [];
 
     // Static context (environment block + static profile) — head of the prompt.
@@ -276,22 +290,17 @@ export function registerMemoryContexts(
     // retrieved memories read immediately after the profile, before any of the
     // native sandbox/approval sections. Evaluated on every assembly; the text
     // provider only reads the cache the inbox handlers populate, so it is a
-    // pure synchronous lookup (zero main-thread blocking).
+    // pure synchronous lookup (zero main-thread blocking). Config is resolved
+    // live per assembly so settings edits surface immediately.
     disposers.push(scopedCtx.systemPrompt.context({
         name: 'supermemory:recall',
         order: 6,
         text: (ctx) => {
             const session = ctx.agent?.session;
             if (!session || isSubagent(session)) return '';
-            return dynamicRecallText(session, c);
+            return dynamicRecallText(session, recallConfigOf(scope));
         },
     }));
 
     return disposers;
-}
-
-/** Skip subagent sessions for context contributions. */
-function isSubagent(session: Session): boolean {
-    return session.header.origin === 'subagent'
-        || (session.header.delegationDepth ?? 0) > 0;
 }

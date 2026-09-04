@@ -23,6 +23,7 @@ import { turnTranscript } from './transcript.ts';
 import { ensureWslProbe } from './environment.ts';
 import { apiFetch } from './upstream.ts';
 import { registerMemoryContexts, clearRecallState, prewarmRecall, bindRecall, recallConfigOf } from './context-inject.ts';
+import { isSubagent } from './session-util.ts';
 
 // ---------------------------------------------------------------------------
 // Session-scoped container snapshot
@@ -227,11 +228,6 @@ async function persistTurn(
 // Registration
 // ---------------------------------------------------------------------------
 
-/** Skip subagent sessions for both hooks. */
-function isSubagent(session: Session): boolean {
-    return session.header.origin === 'subagent'
-        || (session.header.delegationDepth ?? 0) > 0;
-}
 
 // ---------------------------------------------------------------------------
 // Injection orchestration
@@ -246,17 +242,44 @@ function isSubagent(session: Session): boolean {
 /** Static-profile text per container (read by the context text provider).
  *  Pre-warmed at plugin activation (see prewarmProfile) so a brand-new session
  *  on the active container already has a stable profile on its first step —
- *  removing the old per-session async fetch that raced the first assembly. */
-const profileByContainer = new Map<string, string>();
+ *  removing the old per-session async fetch that raced the first assembly.
+ *  Entries carry a fetch timestamp so staleness can be refreshed (TTL in
+ *  `PROFILE_TTL_MS`), instead of caching a container's profile forever. */
+const PROFILE_TTL_MS = 5 * 60 * 1000;
+const profileByContainer = new Map<string, { text: string; at: number }>();
+/** Containers with an in-flight profile fetch — serializes concurrent callers
+ *  (e.g. an activation prewarm racing a session/created top-up for the same
+ *  tag, which can otherwise fire duplicate fetches on a cold boot). */
+const profileFetching = new Set<string>();
 
-/** Pre-warm the active container's static profile once (fire-and-forget). */
-export async function prewarmProfile(scope: SettingsScope<any>): Promise<void> {
+/** Fetch (and cache) the profile for a container regardless of age. Returns the text, or ''. */
+async function ingestProfile(scope: SettingsScope<any>, tag: string): Promise<string> {
+    if (profileFetching.has(tag)) return profileByContainer.get(tag)?.text ?? '';
+    profileFetching.add(tag);
     try {
-        const tag = activeContainer(scope);
-        if (profileByContainer.has(tag)) return;
         const text = await fetchProfile(scope, tag);
-        if (text) profileByContainer.set(tag, text);
-    } catch { /* upstream may still be booting — session/created will retry */ }
+        if (text) profileByContainer.set(tag, { text, at: Date.now() });
+        return text;
+    } catch {
+        return '';
+    } finally {
+        profileFetching.delete(tag);
+    }
+}
+
+/** Pre-warm the active container's static profile if missing or stale. */
+export async function prewarmProfile(scope: SettingsScope<any>): Promise<void> {
+    const tag = activeContainer(scope);
+    const entry = profileByContainer.get(tag);
+    if (entry && Date.now() - entry.at < PROFILE_TTL_MS) return;
+    await ingestProfile(scope, tag);
+}
+
+/** Ensure the profile for `tag` is fresh (fill on miss/TTL-stale). */
+async function ensureProfileFresh(scope: SettingsScope<any>, tag: string): Promise<void> {
+    const entry = profileByContainer.get(tag);
+    if (entry && Date.now() - entry.at < PROFILE_TTL_MS) return;
+    await ingestProfile(scope, tag);
 }
 
 /** Resolve a session's active memory container (session snapshot \|\| global). */
@@ -276,7 +299,7 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
             const container = sessionContainerFor(session!, scope);
             return {
                 container,
-                profile: profileByContainer.get(container) ?? '',
+                profile: profileByContainer.get(container)?.text ?? '',
             };
         }));
     });
@@ -330,8 +353,8 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
 
     // ── Session init: warm WSL probe + snapshot container. The static profile
     //    is pre-warmed at plugin activation (prewarmProfile); this fallback
-    //    only tops up a container whose profile is still uncached (e.g. the
-    //    user switched the global container after boot).
+    //    only tops up a container whose profile is uncached or stale (e.g. the
+    //    user switched the global container after boot, or it aged past TTL).
     disposers.push(ctx.on('session/created', (session) => {
         if (isSubagent(session)) return;
         // Warm the WSL environment probe NOW (synchronously, before the first
@@ -344,13 +367,7 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
                 if (!sessionContainerRef.has(session.id)) {
                     sessionContainerRef.set(session.id, active);
                 }
-                if (!profileByContainer.has(active)) {
-                    try {
-                        const text = await fetchProfile(scope, active);
-                        if (text) profileByContainer.set(active, text);
-                    }
-                    catch { /* upstream may still be booting — leave for a later session */ }
-                }
+                await ensureProfileFresh(scope, active);
                 // Pre-init the session document state so the first turn's PATCH
                 // logic has a stable entry (not strictly required, but keeps a
                 // single ownership path for sessionDocRef).
