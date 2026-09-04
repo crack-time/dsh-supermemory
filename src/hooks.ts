@@ -10,18 +10,21 @@
  *  - systemPrompt.context() registrations (context-inject.ts) -> static
  *    environment+profile and per-message recall flow through the native
  *    assemble → project() step-level path.
- *  - turn/end -> accumulate the turn transcript and PATCH it into the
- *    session's single supermemory document (each session owns one doc).
- *    Subagent sessions are skipped for all of the above.
+ *  - domain/changed (workspace registry) -> archive-time persistence: when a
+ *    session enters the registry's archivedSessionIds, recompute its FULL
+ *    transcript from the persistence-backed event history (live or cold) and
+ *    upsert it into supermemory (idempotent PATCH overwrite). This replaces the
+ *    old per-turn write that re-ingested the transcript (and re-ran the
+ *    upstream LLM filter) on every turn. Subagent sessions are skipped.
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { Session } from '@deepseek-ai/dsh-session';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
 import { activeContainer, requireUpstream } from './config.ts';
 import { fetchProfile } from './containers.ts';
-import { turnTranscript } from './transcript.ts';
+import { sessionTranscript } from './transcript.ts';
 import { ensureWslProbe } from './environment.ts';
-import { apiFetch } from './upstream.ts';
+import { apiFetch, listDocumentPages } from './upstream.ts';
 import { registerMemoryContexts, clearRecallState, prewarmRecall, bindRecall, recallConfigOf } from './context-inject.ts';
 import { isSubagent } from './session-util.ts';
 
@@ -31,7 +34,7 @@ import { isSubagent } from './session-util.ts';
 
 /**
  * Per-session container snapshot, taken at session/created and used by
- * turn/end persistence + context rendering — so injection and writes stay
+ * archive-time persistence + context rendering — so injection and writes stay
  * bound to the SAME space even if the user switches the global setting
  * mid-session. Missing entry falls back to the live global setting.
  */
@@ -47,36 +50,29 @@ export function setSessionContainer(sessionId: string, tag: string): void {
     sessionContainerRef.set(sessionId, tag);
 }
 
+/**
+ * Sessions we have already run archive-time persistence for (since boot).
+ * Guards a single domain/changed batch from re-entering the write for a session
+ * that appears multiple times in one `archivedSessionIds` update. Purely
+ * in-memory re-entry lock — NOT durability: re-archives after a restart are
+ * still handled (PATCH-overwrite via metadata.sessionId) and non-archived
+ * sessions are never logged here.
+ */
+const archivedBySession = new Set<string>();
+
 // ---------------------------------------------------------------------------
-// Session-scoped document persistence
+// Archive-time session persistence
 //
-// One document per session, updated (PATCH) with the cumulative transcript on
-// every turn — instead of the old turn-per-document scheme that grew the
-// document count linearly with turns. Kept in-memory so the cumulative text
-// survives a miss and the "patching" flag serializes PATCHes (a PATCH issued
-// while a previous one is still processing is dropped upstream, so we never
-// run two at once; the full text is re-broadcast next time).
+// The session's FULL transcript is written to supermemory exactly once, when
+// the session is archived (workspace "archive session" action). This replaces
+// the old per-turn PATCH-on-every-turn scheme, which re-ingested (and re-ran
+// the upstream LLM filter, `shouldLLMFilter`) on every finished turn. The
+// write is idempotent against the session's persistence-backed event history
+// (never the in-memory accumulator): on archive we read the session's complete
+// events — live, or via sessionPersistence.load() when cold — recompute the
+// full transcript, and PATCH-overwrite the existing session document if one
+// exists (found by its `metadata.sessionId`), else POST a new one.
 // ---------------------------------------------------------------------------
-
-export interface SessionDocState {
-    /** Upstream document id for this session, once created. */
-    docId?: string;
-    /** Cumulative transcript text since session creation. */
-    fullText: string;
-    /** True while a PATCH is in flight — skip new turns until it settles. */
-    patching: boolean;
-}
-
-const sessionDocRef = new Map<string, SessionDocState>();
-
-function sessionDocState(sessionId: string): SessionDocState {
-    let entry = sessionDocRef.get(sessionId);
-    if (!entry) {
-        entry = { fullText: '', patching: false };
-        sessionDocRef.set(sessionId, entry);
-    }
-    return entry;
-}
 
 /** Poll GET /v3/documents/{id} until status === "done" or the timeout elapses. */
 async function waitDocumentDone(
@@ -103,14 +99,10 @@ async function waitDocumentDone(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Turn persistence — one document per finished turn.
-// ---------------------------------------------------------------------------
-
 /**
  * Per-session workspace cache: a session cwd (and thus its workspace) never
- * changes, so resolve once and reuse. Shared by persistTurn (every turn) and
- * any future consumer; cleaned up on session/disposed.
+ * changes, so resolve once and reuse. Shared by archive-time persistence and
+ * cleaned up on session/disposed.
  */
 const sessionWorkspaceRef = new Map<string, string | undefined>();
 const workspaceResolving = new Set<string>();
@@ -139,88 +131,137 @@ async function workspaceOf(ctx: Context, session: Session): Promise<string | und
 }
 
 /**
- * Upsert the cumulative session transcript into one session-scoped document.
- *
- * First call for a session creates the document (POST); subsequent calls
- * PATCH the full cumulative text onto the same document, so the document
- * count stays O(sessions), not O(turns). While a PATCH is still processing
- * upstream this call bails early — the full text is already accumulated in
- * `sessionDocRef` and will be re-broadcast on the next turn, so no content is
- * lost even if an update is dropped.
+ * Resolve a session's full event history, live-first then from persistence.
+ * Returns a shape exposing `snapshotEvents()` (a minimal Session facade) so
+ * the transcript composer can scan it — matches Session's surface, but cold
+ * sessions are built from their persisted inspection.
  */
-async function persistTurn(
+/** Minimal event-source facade: the transcript composer only needs the id and a
+ *  snapshotEvents() that returns the session's event history (live or cold). */
+interface TranscriptSource {
+    id: string;
+    snapshotEvents: () => readonly unknown[];
+}
+
+async function sessionEventsOf(
+    ctx: Context,
+    sessionId: string,
+): Promise<TranscriptSource | undefined> {
+    // Branded SessionId is enforced only at API boundaries; here we hold the
+    // raw string id from the workspace registry, so cast at the call site.
+    const sid = sessionId as unknown as Parameters<Context['sessions']['get']>[0];
+    const live = ctx.sessions?.get(sid);
+    if (live) return { id: sessionId, snapshotEvents: live.snapshotEvents.bind(live) };
+    const persistence = ctx.sessionPersistence;
+    if (!persistence) return undefined;
+    try {
+        const inspection = await persistence.load(sid);
+        const events = inspection.events as readonly unknown[];
+        return { id: sessionId, snapshotEvents: () => events };
+    }
+    catch {
+        return undefined;
+    }
+}
+
+/**
+ * Find an existing supermemory document for this session by its
+ * `metadata.sessionId`, so re-archive PATCHes-overwrites instead of duplicating.
+ */
+async function findSessionDocument(
+    base: string,
+    apiKey: string,
+    sessionId: string,
+): Promise<string | undefined> {
+    let found: string | undefined;
+    await listDocumentPages(base, apiKey, { limit: 200, maxPages: 20 }, (docs) => {
+        if (found) return;
+        for (const d of docs) {
+            if (d.metadata?.sessionId !== sessionId) continue;
+            found = d.id;
+            return;
+        }
+    });
+    return found;
+}
+
+/**
+ * Idempotently persist a session's FULL transcript on archive.
+ *
+ * In-memory accumulator absent by design: the transcript is recomputed from the
+ * session's persistence-backed event history (live or cold), so a warm restart
+ * never loses content. Existing document (matched by metadata.sessionId) is
+ * PATCH-overwritten with the fresh transcript; otherwise a new document is
+ * POST-created with `customId = session.id`.
+ */
+async function persistSessionAtArchive(
     ctx: Context,
     scope: SettingsScope<any>,
-    session: Session,
-    turn: number,
-    text: string,
+    sessionId: string,
 ): Promise<void> {
-    const entry = sessionDocState(session.id);
-    entry.fullText = entry.fullText
-        ? entry.fullText + '\n\n' + text
-        : text;
-
-    // Serialize PATCHes: an update sent while the previous one is still
-    // processing is ignored upstream, so never run two at once.
-    if (entry.patching) return;
-    entry.patching = true;
-    try {
-        const { base, apiKey } = requireUpstream(scope);
-        const workspace = await workspaceOf(ctx, session);
-        const containerTag = sessionContainerRef.get(session.id) ?? activeContainer(scope);
-        const meta: Record<string, unknown> = {
-            sessionId: session.id,
-            lastTurn: turn,
-            ...(workspace ? { workspace } : {}),
-        };
-        const signal = AbortSignal.timeout(30000);
-
-        if (entry.docId) {
-            // Update existing session document with the cumulative transcript.
-            await apiFetch(base, apiKey, '/v3/documents/' + encodeURIComponent(entry.docId), {
-                method: 'PATCH',
-                body: {
-                    content: entry.fullText,
-                    taskType: 'memory',
-                    documentDate: new Date().toISOString(),
-                },
-                signal,
-            });
-            await waitDocumentDone(base, apiKey, entry.docId);
-        }
-        else {
-            // First turn: create the session document.
-            const customId = session.id.replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 100);
-            const created = await apiFetch<{ id?: string; status?: string }>(
-                base,
-                apiKey,
-                '/v3/documents',
-                {
-                    method: 'POST',
-                    body: {
-                        content: entry.fullText,
-                        containerTag,
-                        customId,
-                        taskType: 'memory',
-                        dreaming: 'dynamic',
-                        documentDate: new Date().toISOString(),
-                        metadata: meta,
-                    },
-                    signal,
-                },
-            );
-            if (created.id) {
-                entry.docId = created.id;
-                ctx.logger.debug('supermemory session doc created id=' + created.id + ' session=' + session.id);
-                await waitDocumentDone(base, apiKey, created.id);
-            }
-        }
+    const source = await sessionEventsOf(ctx, sessionId);
+    if (!source) {
+        ctx.logger.warn('supermemory archive: no event source for session ' + sessionId);
+        return;
     }
-    catch (error) {
-        ctx.logger.warn('supermemory turn persist:', error);
+    // The transcript composer needs only id + snapshotEvents(); workspaceOf
+    // reads the (optional) cwd header. Live sessions carry their header; cold
+    // sessions have none, which just leaves workspace undefined.
+    const fake = { id: sessionId, snapshotEvents: source.snapshotEvents } as Session;
+    const text = sessionTranscript(fake);
+    if (!text) {
+        ctx.logger.warn('supermemory archive: empty transcript for session ' + sessionId);
+        return;
     }
-    finally {
-        entry.patching = false;
+    const { base, apiKey } = requireUpstream(scope);
+    const containerTag = sessionContainerRef.get(sessionId) ?? activeContainer(scope);
+    const workspace = await workspaceOf(ctx, fake);
+    const meta: Record<string, unknown> = {
+        sessionId,
+        archivedAt: new Date().toISOString(),
+        ...(workspace ? { workspace } : {}),
+    };
+    const signal = AbortSignal.timeout(30000);
+
+    const docId = await findSessionDocument(base, apiKey, sessionId);
+    if (docId) {
+        // Re-archive / already exists: overwrite the cumulative transcript.
+        await apiFetch(base, apiKey, '/v3/documents/' + encodeURIComponent(docId), {
+            method: 'PATCH',
+            body: {
+                content: text,
+                taskType: 'memory',
+                documentDate: new Date().toISOString(),
+            },
+            signal,
+        });
+        await waitDocumentDone(base, apiKey, docId);
+        ctx.logger.debug('supermemory archive: PATCH updated session doc id=' + docId + ' session=' + sessionId);
+        return;
+    }
+    // First archive: create the session document.
+    const customId = sessionId.replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 100);
+    const created = await apiFetch<{ id?: string; status?: string }>(
+        base,
+        apiKey,
+        '/v3/documents',
+        {
+            method: 'POST',
+            body: {
+                content: text,
+                containerTag,
+                customId,
+                taskType: 'memory',
+                dreaming: 'dynamic',
+                documentDate: new Date().toISOString(),
+                metadata: meta,
+            },
+            signal,
+        },
+    );
+    if (created.id) {
+        ctx.logger.debug('supermemory archive: session doc created id=' + created.id + ' session=' + sessionId);
+        await waitDocumentDone(base, apiKey, created.id);
     }
 }
 
@@ -347,7 +388,7 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
         sessionContainerRef.delete(session.id);
         sessionWorkspaceRef.delete(session.id);
         workspaceResolving.delete(session.id);
-        sessionDocRef.delete(session.id);
+        archivedBySession.delete(session.id);
         clearRecallState(session.id);
     }));
 
@@ -368,30 +409,41 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
                     sessionContainerRef.set(session.id, active);
                 }
                 await ensureProfileFresh(scope, active);
-                // Pre-init the session document state so the first turn's PATCH
-                // logic has a stable entry (not strictly required, but keeps a
-                // single ownership path for sessionDocRef).
-                sessionDocState(session.id);
             } catch (error) {
                 ctx.logger.warn('supermemory session init:', error);
             }
         })();
     }));
 
-    // ── Turn persistence ──────────────────────────────────────────────────
+    // ── Archive-time persistence ──────────────────────────────────────────
     //
-    // Recall is injected via the inbox + context providers above, not here.
-    // This handler only persists the finished turn's transcript.
-    disposers.push(ctx.on('session/event', (session, event) => {
-        if (isSubagent(session)) return;
-        if (event.type === 'user/message') {
-            return;
+    // The native "archive session" action (workspace three-dot menu) writes to
+    // the workspace registry's archivedSessionIds, which the workspace domain
+    // publishes as a domain/changed update with table "" and a value carrying
+    // archivedSessionIds. When a session enters that set we persist its FULL
+    // transcript to supermemory — once per session per boot (archivedBySession
+    // guards the re-entry), idempotently PATCHing any prior document.
+    disposers.push(ctx.on('domain/changed', (change) => {
+        try {
+            const c = change as {
+                domain?: string;
+                table?: string;
+                operation?: string;
+                value?: { archivedSessionIds?: readonly unknown[] };
+            };
+            if (c.domain !== 'workspace') return;
+            if (c.table !== '' || c.operation !== 'put') return;
+            const archived = c.value?.archivedSessionIds ?? [];
+            if (archived.length === 0) return;
+            for (const raw of archived) {
+                const sessionId = typeof raw === 'string' ? raw : '';
+                if (!sessionId) continue;
+                if (archivedBySession.has(sessionId)) continue;
+                archivedBySession.add(sessionId);
+                void persistSessionAtArchive(ctx, scope, sessionId);
+            }
         }
-        if (event.type !== 'turn/end') return;
-        const turn = (event.data as { turn: number }).turn;
-        const transcript = turnTranscript(session, turn);
-        if (!transcript) return;
-        void persistTurn(ctx, scope, session, turn, transcript);
+        catch (error) { ctx.logger.warn('supermemory archive hook:', error); }
     }));
 
     return disposers;

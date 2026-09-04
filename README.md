@@ -36,13 +36,14 @@
 
 七个工具 host 端直连上游并注入配置的 API Key（与代理同一密钥源，无第二处凭据），模型不接触密钥。**不需要 MCP**：工具只在 dsh 内使用，MCP 桥只在需要跨客户端（Claude/Cursor 等）共享记忆时才值得引入。
 
-### 确定性记忆钩子（免工具 · 每会话注入 + 每轮写库）
+### 确定性记忆钩子（免工具 · 每会话注入 + 归档写库）
 host 端监听 dsh 会话事件，实现“零操作记忆”：
 
-- **session/created → 注入记忆上下文**：会话创建时拉取 `activeContainer` 的 /v4/profile（长期事实 static + 近期动态 dynamic），连同容器清单作为第一条 user 消息注入（agent.inject），每会话一次；上游未就绪时最多重试 4 次（退避等待托管服务启动）；子代理会话跳过
-- **turn/end → 逐轮写库**：每轮结束后把该轮文本（真实用户消息 + 助手回复 + 工具调用）POST 成 supermemory 文档（POST /v3/documents，customId=sessionId-turn-N、taskType=memory、dreaming=dynamic、documentDate=该轮时间），索引约 30–60 秒后成为可检索的动态记忆；子代理会话跳过
-- **低值过滤**：纯确认/单一字符/命令式回复（“确认”“A”“do it”…）不写库
-- **策略**：每轮都写，不做“关键才写”过滤（关键无法定义）；上下文注入顺序 系统提示词 → 记忆 → 用户消息 → 权限 → 技能
+- **session/created → 注入记忆上下文**：会话创建时拉取 `activeContainer` 的 /v4/profile（长期事实 static），连同容器清单作为第一条 user 消息注入（agent.inject），每会话一次；上游未就绪时最多重试 4 次（退避等待托管服务启动）；子代理会话跳过
+- **动态记忆 → 每消息召回**：每条用户消息在发送/认领阶段同步检索 supermemory（SAB + Atomics 同步 search-worker），命中结果作为「相关记忆」注入，base 块始终渲染（无命中显示英文占位）；见 tools/ 与 context-inject.ts
+- **归档会话 → 一次性写库**：监听到会话归档（workspace 三点菜单的 Archive session → workspace 域的 `archivedSessionIds`），在归档那一刻把该会话的**完整 transcript**（从持久化事件历史重算，live 或冷会话均可）一次性写入 supermemory（POST /v3/documents，customId=session.id、taskType=memory、dreaming=dynamic；已有文档按 `metadata.sessionId` 匹配后 PATCH 覆盖，重复归档幂等）；子代理会话跳过
+- **省 token**：不再逐轮写库 → 只在归档时入库，避免了每轮触发上游 LLM 过滤（`shouldLLMFilter`）带来的 token 开销
+- **策略**：只在归档时写入，不排除中间轮次内容（整段 transcript 完整入库，交由上游 dreaming/过滤处理）；上下文注入顺序 系统提示词 → 记忆 → 用户消息 → 权限 → 技能
 
 ### 托管本地服务器进程（默认随 dsh 启停）
 
@@ -66,7 +67,7 @@ src/
 ├── http.ts            # 反向代理 + 健康检查 + /api 路由
 ├── containers.ts      # 容器发现（并行 profile 请求）+ 计数
 ├── tools.ts           # 七个记忆工具
-├── hooks.ts           # session/created 注入 + turn/end 写库（含低值过滤）
+├── hooks.ts           # 会话钩子：记忆上下文注册 + 归档时一次性写库
 └── client/
     ├── index.ts       # client 入口（slot 注册 + 本地声明合并）
     ├── card.tsx       # 设置卡片组件

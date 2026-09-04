@@ -10,9 +10,12 @@
  *  - systemPrompt.context() registrations (context-inject.ts) -> static
  *    environment+profile and per-message recall flow through the native
  *    assemble → project() step-level path.
- *  - turn/end -> accumulate the turn transcript and PATCH it into the
- *    session's single supermemory document (each session owns one doc).
- *    Subagent sessions are skipped for all of the above.
+ *  - domain/changed (workspace registry) -> archive-time persistence: when a
+ *    session enters the registry's archivedSessionIds, recompute its FULL
+ *    transcript from the persistence-backed event history (live or cold) and
+ *    upsert it into supermemory (idempotent PATCH overwrite). This replaces the
+ *    old per-turn write that re-ingested the transcript (and re-ran the
+ *    upstream LLM filter) on every turn. Subagent sessions are skipped.
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
@@ -20,14 +23,6 @@ import type { SettingsScope } from '@deepseek-ai/dsh-settings';
 export declare function getSessionContainer(sessionId: string): string | undefined;
 /** Override the session container snapshot (used by the input-bar selector). */
 export declare function setSessionContainer(sessionId: string, tag: string): void;
-export interface SessionDocState {
-    /** Upstream document id for this session, once created. */
-    docId?: string;
-    /** Cumulative transcript text since session creation. */
-    fullText: string;
-    /** True while a PATCH is in flight — skip new turns until it settles. */
-    patching: boolean;
-}
 /** Pre-warm the active container's static profile if missing or stale. */
 export declare function prewarmProfile(scope: SettingsScope<any>): Promise<void>;
 /** Register the session hooks (context registration + turn persistence). */
