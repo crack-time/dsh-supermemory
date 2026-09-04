@@ -112,7 +112,7 @@ export function SupermemorySettingsCard(props: CardProps) {
                         <input
                             type="text"
                             value={serverPath}
-                            placeholder="C:\Users\crack\Supermemory\supermemory-server-windows-x64.exe"
+                            placeholder="C:\\Users\\crack\\Supermemory\\supermemory-server-windows-x64.exe"
                             spellCheck={false}
                             onChange={(e) => setServerPath(e.target.value)}
                         />
