@@ -20,7 +20,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { Session } from '@deepseek-ai/dsh-session';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { activeContainer, requireUpstream } from './config.ts';
@@ -47,6 +47,9 @@ import { isSubagent } from './session-util.ts';
  */
 /** The persistent per-session container store location. */
 export const SESSION_CONTAINER_FILE = join(homedir(), '.dsh', 'supermemory', 'session-containers.json');
+
+/** How often the per-session container map is swept for stale (deleted) sessions. */
+export const SESSION_CONTAINER_GC_INTERVAL_MS = 10 * 60 * 1000;
 
 /** Load the per-session container map from disk (on module load). */
 function loadSessionContainers(): Map<string, string> {
@@ -82,6 +85,57 @@ export function getSessionContainer(sessionId: string): string | undefined {
 export function setSessionContainer(sessionId: string, tag: string): void {
     sessionContainerRef.set(sessionId, tag);
     persistSessionContainers();
+}
+
+/**
+ * Collect every session id that currently exists on disk under the DSH sessions
+ * root (`~/.dsh/sessions/<workspace>/<session-id>/`). A deleted DSH session has
+ * its log directory removed, so this is a reliable "does this session still
+ * exist?" signal for pruning stale per-session container bindings.
+ */
+export function existingSessionIds(): Set<string> {
+    const found = new Set<string>();
+    const root = join(homedir(), '.dsh', 'sessions');
+    let workspaces: string[];
+    try {
+        workspaces = readdirSync(root, { withFileTypes: true })
+            .filter((d) => d.isDirectory())
+            .map((d) => d.name);
+    }
+    catch { return found; }
+    for (const ws of workspaces) {
+        let names: string[];
+        try {
+            names = readdirSync(join(root, ws), { withFileTypes: true })
+                .filter((d) => d.isDirectory())
+                .map((d) => d.name);
+        }
+        catch { continue; }
+        for (const name of names) {
+            if (name.startsWith('session-')) found.add(name);
+        }
+    }
+    return found;
+}
+
+/**
+ * Drop per-session container entries for sessions that no longer exist (their
+ * DSH log dir is gone). Keeps entries that are still live even if the log isn't
+ * flushed to disk yet. Persists only when something was removed. Returns how
+ * many stale bindings were pruned.
+ */
+export function pruneStaleSessionContainers(liveIds?: Iterable<string>): number {
+    const existing = existingSessionIds();
+    if (liveIds) for (const id of liveIds) existing.add(id);
+    let removed = 0;
+    for (const key of [...sessionContainerRef.keys()]) {
+        if (!existing.has(key)) {
+            sessionContainerRef.delete(key);
+            removed += 1;
+        }
+    }
+    if (removed > 0) persistSessionContainers();
+    return removed;
 }
 
 /**
@@ -479,6 +533,22 @@ export function registerSessionHooks(ctx: Context, scope: SettingsScope<any>): A
         }
         catch (error) { ctx.logger.warn('supermemory archive hook:', error); }
     }));
+
+    // ── Per-session container GC ──────────────────────────────────────────
+    // Prune stale bindings so session-containers.json does not grow forever as
+    // sessions are deleted. Runs once at activation and then on a slow timer;
+    // a key survives if the session is live in memory OR still has a log dir.
+    const gcStale = (): void => {
+        try {
+            const live = ctx.sessions?.list?.() ? ctx.sessions.list().map((s) => s.id) : [];
+            const removed = pruneStaleSessionContainers(live);
+            if (removed > 0) ctx.logger.debug('supermemory session-container GC: pruned ' + removed + ' stale entries');
+        }
+        catch (error) { ctx.logger.warn('supermemory session-container GC:', error); }
+    };
+    gcStale();
+    const gcTimer = setInterval(gcStale, SESSION_CONTAINER_GC_INTERVAL_MS);
+    disposers.push(() => clearInterval(gcTimer));
 
     return disposers;
 }

@@ -31,12 +31,28 @@ import type { SettingsScope } from '@deepseek-ai/dsh-settings';
  */
 /** The persistent per-session container store location. */
 export declare const SESSION_CONTAINER_FILE: string;
+/** How often the per-session container map is swept for stale (deleted) sessions. */
+export declare const SESSION_CONTAINER_GC_INTERVAL_MS: number;
 /** Persist the session/container map so a session keeps its space across restarts. */
 export declare function persistSessionContainers(): void;
 /** Look up the container a session was bound to at creation time. */
 export declare function getSessionContainer(sessionId: string): string | undefined;
 /** Override the session container snapshot (used by the input-bar selector). */
 export declare function setSessionContainer(sessionId: string, tag: string): void;
+/**
+ * Collect every session id that currently exists on disk under the DSH sessions
+ * root (`~/.dsh/sessions/<workspace>/<session-id>/`). A deleted DSH session has
+ * its log directory removed, so this is a reliable "does this session still
+ * exist?" signal for pruning stale per-session container bindings.
+ */
+export declare function existingSessionIds(): Set<string>;
+/**
+ * Drop per-session container entries for sessions that no longer exist (their
+ * DSH log dir is gone). Keeps entries that are still live even if the log isn't
+ * flushed to disk yet. Persists only when something was removed. Returns how
+ * many stale bindings were pruned.
+ */
+export declare function pruneStaleSessionContainers(liveIds?: Iterable<string>): number;
 /** Pre-warm the active container's static profile if missing or stale. */
 export declare function prewarmProfile(scope: SettingsScope<any>): Promise<void>;
 /** Register the session hooks (context registration + turn persistence). */
