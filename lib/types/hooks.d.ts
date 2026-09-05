@@ -19,6 +19,20 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
+/**
+ * Per-session container snapshot, taken at session/created and used by
+ * archive-time persistence + context rendering — so injection and writes stay
+ * bound to the SAME space even if the user switches the global setting
+ * mid-session. Missing entry falls back to the live global setting.
+ *
+ * Persisted to disk (~/.dsh/supermemory/session-containers.json) so a resumed
+ * session remembers the space chosen in the input-bar selector across restarts
+ * instead of defaulting to the global activeContainer.
+ */
+/** The persistent per-session container store location. */
+export declare const SESSION_CONTAINER_FILE: string;
+/** Persist the session/container map so a session keeps its space across restarts. */
+export declare function persistSessionContainers(): void;
 /** Look up the container a session was bound to at creation time. */
 export declare function getSessionContainer(sessionId: string): string | undefined;
 /** Override the session container snapshot (used by the input-bar selector). */

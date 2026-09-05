@@ -20,6 +20,9 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { Session } from '@deepseek-ai/dsh-session';
 import type { SettingsScope } from '@deepseek-ai/dsh-settings';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 import { activeContainer, requireUpstream } from './config.ts';
 import { fetchProfile } from './containers.ts';
 import { sessionTranscript } from './transcript.ts';
@@ -37,8 +40,38 @@ import { isSubagent } from './session-util.ts';
  * archive-time persistence + context rendering — so injection and writes stay
  * bound to the SAME space even if the user switches the global setting
  * mid-session. Missing entry falls back to the live global setting.
+ *
+ * Persisted to disk (~/.dsh/supermemory/session-containers.json) so a resumed
+ * session remembers the space chosen in the input-bar selector across restarts
+ * instead of defaulting to the global activeContainer.
  */
-const sessionContainerRef = new Map<string, string>();
+/** The persistent per-session container store location. */
+export const SESSION_CONTAINER_FILE = join(homedir(), '.dsh', 'supermemory', 'session-containers.json');
+
+/** Load the per-session container map from disk (on module load). */
+function loadSessionContainers(): Map<string, string> {
+    const map = new Map<string, string>();
+    try {
+        const raw = readFileSync(SESSION_CONTAINER_FILE, 'utf8');
+        const obj = JSON.parse(raw) as Record<string, unknown>;
+        for (const [k, v] of Object.entries(obj)) {
+            if (typeof v === 'string' && v.trim()) map.set(k, v.trim());
+        }
+    }
+    catch { /* no file yet — first run */ }
+    return map;
+}
+
+const sessionContainerRef = loadSessionContainers();
+
+/** Persist the session/container map so a session keeps its space across restarts. */
+export function persistSessionContainers(): void {
+    try {
+        mkdirSync(dirname(SESSION_CONTAINER_FILE), { recursive: true });
+        writeFileSync(SESSION_CONTAINER_FILE, JSON.stringify(Object.fromEntries(sessionContainerRef), null, 2));
+    }
+    catch { /* non-fatal: a missed cache write just falls back to the global tag */ }
+}
 
 /** Look up the container a session was bound to at creation time. */
 export function getSessionContainer(sessionId: string): string | undefined {
@@ -48,6 +81,7 @@ export function getSessionContainer(sessionId: string): string | undefined {
 /** Override the session container snapshot (used by the input-bar selector). */
 export function setSessionContainer(sessionId: string, tag: string): void {
     sessionContainerRef.set(sessionId, tag);
+    persistSessionContainers();
 }
 
 /**
